@@ -5,15 +5,17 @@ argument editor (as mirrored by ndscan.experiment.scan_generator).
 """
 
 import logging
+import math
 from collections import OrderedDict
 from enum import Enum, unique
-from typing import Any
+from typing import Any, Optional
 
 from artiq.gui.scientific_spinbox import ScientificSpinBox
 from artiq.gui.tools import disable_scroll_wheel
 from sipyco import pyon
 
 from .._qt import QtCore, QtGui, QtWidgets
+from ..utils import eval_param_default
 from .utils import format_override_identity, load_icon_cached
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 def parse_list_pyon(values: str) -> list[float]:
     return pyon.decode("[" + values + "]")
+
+
+def _raise_missing_default_dataset(key, default=None):
+    raise KeyError(key)
 
 
 def make_divider():
@@ -31,6 +37,18 @@ def make_divider():
         QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Expanding
     )
     return f
+
+
+def make_icon_label(
+    sp: QtWidgets.QStyle.StandardPixmap, tooltip: str
+) -> QtWidgets.QLabel:
+    label = QtWidgets.QLabel()
+    icon = QtWidgets.QApplication.style().standardIcon(sp)
+    label.setPixmap(icon.pixmap(16, 16))
+    label.setToolTip(tooltip)
+    label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+    label.setFixedWidth(20)
+    return label
 
 
 @unique
@@ -56,6 +74,7 @@ class ScanOption(QtCore.QObject):
 
     value_changed = QtCore.pyqtSignal()
     execution_modes = frozenset({"scan", "optimise"})
+    option_tooltip = ""
 
     def __init__(self, schema: dict[str, Any], path: str):
         super().__init__()
@@ -90,8 +109,11 @@ class ScanOption(QtCore.QObject):
 
 
 class StringFixedScanOption(ScanOption):
+    option_tooltip = "Hold this parameter fixed at a string value."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box = QtWidgets.QLineEdit()
+        self.box.setToolTip("Fixed string value")
         layout.addWidget(self.box)
 
     def write_to_params(self, params: dict) -> None:
@@ -103,8 +125,11 @@ class StringFixedScanOption(ScanOption):
 
 
 class BoolFixedScanOption(ScanOption):
+    option_tooltip = "Hold this parameter fixed at a boolean value."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box = QtWidgets.QCheckBox()
+        self.box.setToolTip("Fixed boolean value")
         layout.addWidget(self.box)
 
     def write_to_params(self, params: dict) -> None:
@@ -116,11 +141,14 @@ class BoolFixedScanOption(ScanOption):
 
 
 class EnumFixedScanOption(ScanOption):
+    option_tooltip = "Hold this parameter fixed at one enum member."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box = QtWidgets.QComboBox()
         self._members = self.schema["spec"]["members"]
         self._member_values_to_keys = {val: key for key, val in self._members.items()}
         self.box.addItems(self._members.values())
+        self.box.setToolTip("Fixed enum value")
         layout.addWidget(self.box)
 
     def write_to_params(self, params: dict) -> None:
@@ -177,10 +205,105 @@ class NumericScanOption(ScanOption):
             box.setSuffix(" " + unit)
         return box
 
+    def _default_numeric_spec_value(self, key: str, fallback: float = 0.0) -> float:
+        value = self.schema.get("spec", {}).get(key)
+        if value is None:
+            return fallback
+        if isinstance(value, (int, float)) and not math.isfinite(value):
+            return fallback
+        return float(value)
+
+    def _default_numeric_step_value(self, fallback: float = 1.0) -> float:
+        value = self.schema.get("spec", {}).get("step")
+        if value is None:
+            return fallback
+        value = float(value)
+        if not math.isfinite(value) or value <= 0.0:
+            return fallback
+        return value
+
+    def _default_numeric_param_value(self) -> Optional[float]:
+        try:
+            return float(
+                eval_param_default(
+                    self.schema["default"],
+                    _raise_missing_default_dataset,
+                )
+            )
+        except Exception:
+            return None
+
+    def _default_numeric_centre_value(self, fallback: float = 0.0) -> float:
+        value = self._default_numeric_param_value()
+        if value is None or not math.isfinite(value):
+            return fallback
+        return value
+
+    def _default_numeric_range_values(self) -> tuple[float, float]:
+        lower = self.schema.get("spec", {}).get("min")
+        upper = self.schema.get("spec", {}).get("max")
+        if isinstance(lower, (int, float)) and not math.isfinite(lower):
+            lower = None
+        if isinstance(upper, (int, float)) and not math.isfinite(upper):
+            upper = None
+
+        centre = self._default_numeric_param_value()
+        step = self._default_numeric_step_value()
+
+        if lower is not None:
+            lower = float(lower)
+        if upper is not None:
+            upper = float(upper)
+
+        if lower is None and upper is None:
+            if centre is None:
+                return 0.0, step
+            return centre - step, centre + step
+
+        if lower is None:
+            if centre is None:
+                lower = upper - step
+            else:
+                lower = min(centre - step, upper)
+        if upper is None:
+            if centre is None:
+                upper = lower + step
+            else:
+                upper = max(centre + step, lower)
+
+        if upper < lower:
+            lower, upper = upper, lower
+        if upper == lower:
+            upper = lower + step
+        return lower, upper
+
+    def _default_numeric_half_span_value(self) -> float:
+        lower, upper = self._default_numeric_range_values()
+        centre = self._default_numeric_centre_value((lower + upper) / 2.0)
+
+        half_span = min(max(centre - lower, 0.0), max(upper - centre, 0.0))
+        if half_span > 0.0:
+            return half_span
+
+        half_span = abs(upper - lower) / 2.0
+        if half_span > 0.0:
+            return half_span
+        return self._default_numeric_step_value()
+
+    def _current_numeric_sync_value(self, sync_values: dict) -> Optional[float]:
+        if SyncValue.initial in sync_values:
+            return sync_values[SyncValue.initial]
+        if SyncValue.centre in sync_values:
+            return sync_values[SyncValue.centre]
+        return None
+
 
 class FixedScanOption(NumericScanOption):
+    option_tooltip = "Hold this parameter fixed at a single value."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box = self._make_spin_box()
+        self.box.setToolTip("Fixed parameter value")
         layout.addWidget(self.box)
 
     def write_to_params(self, params: dict) -> None:
@@ -194,10 +317,12 @@ class FixedScanOption(NumericScanOption):
         self.box.setValue(float(value) / self.scale)
 
     def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box.setValue(sync_values[SyncValue.centre])
+        value = self._current_numeric_sync_value(sync_values)
+        if value is not None:
+            self.box.setValue(value)
 
     def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.initial] = self.box.value()
         sync_values[SyncValue.centre] = self.box.value()
 
 
@@ -222,6 +347,9 @@ class RangeScanOption(NumericScanOption):
         self.box_points = QtWidgets.QSpinBox()
         self.box_points.setMinimum(2)
         self.box_points.setValue(21)
+        self.box_points.setToolTip(
+            "Number of points in the finite scan grid when infinite refinement is off"
+        )
 
         # Somewhat gratuitously restrict the number of scan points for sizing, and to
         # avoid the user accidentally pasting in millions of points, etc.
@@ -256,8 +384,14 @@ class RangeScanOption(NumericScanOption):
 
 
 class MinMaxScanOption(RangeScanOption):
+    option_tooltip = (
+        "Scan between lower and upper bounds on either a finite linear grid or an "
+        "infinitely refining grid."
+    )
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box_start = self._make_spin_box()
+        self.box_start.setToolTip("Lower bound or start value")
         layout.addWidget(self.box_start)
         layout.setStretchFactor(self.box_start, 1)
 
@@ -268,33 +402,42 @@ class MinMaxScanOption(RangeScanOption):
         layout.addWidget(make_divider())
 
         self.box_stop = self._make_spin_box()
+        self.box_stop.setToolTip("Upper bound or stop value")
         layout.addWidget(self.box_stop)
         layout.setStretchFactor(self.box_stop, 1)
 
+        lower, upper = self._default_numeric_range_values()
+        self.box_start.setValue(lower / self.scale)
+        self.box_stop.setValue(upper / self.scale)
+
     def read_sync_values(self, sync_values: dict) -> None:
+        lower, upper = self._default_numeric_range_values()
         if SyncValue.lower in sync_values:
             self.box_start.setValue(sync_values[SyncValue.lower])
+        else:
+            self.box_start.setValue(lower / self.scale)
         if SyncValue.upper in sync_values:
             self.box_stop.setValue(sync_values[SyncValue.upper])
+        else:
+            self.box_stop.setValue(upper / self.scale)
         if SyncValue.num_points in sync_values:
             self.box_points.setValue(sync_values[SyncValue.num_points])
 
     def write_sync_values(self, sync_values: dict) -> None:
-        sync_values[SyncValue.lower] = self.box_start.value()
-        sync_values[SyncValue.upper] = self.box_stop.value()
         sync_values[SyncValue.num_points] = self.box_points.value()
 
     def attempt_read_from_axis(self, axis: dict) -> bool:
+        lower, upper = self._default_numeric_range_values()
         if axis["type"] == "refining":
             self.check_infinite.setChecked(True)
-            self.box_start.setValue(axis["range"].get("lower", 0.0) / self.scale)
-            self.box_stop.setValue(axis["range"].get("upper", 0.0) / self.scale)
+            self.box_start.setValue(axis["range"].get("lower", lower) / self.scale)
+            self.box_stop.setValue(axis["range"].get("upper", upper) / self.scale)
             self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
             return True
         if axis["type"] == "linear":
             self.check_infinite.setChecked(False)
-            self.box_start.setValue(axis["range"].get("start", 0.0) / self.scale)
-            self.box_stop.setValue(axis["range"].get("stop", 0.0) / self.scale)
+            self.box_start.setValue(axis["range"].get("start", lower) / self.scale)
+            self.box_stop.setValue(axis["range"].get("stop", upper) / self.scale)
             self.box_points.setValue(axis["range"].get("num_points", 21))
             self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
             return True
@@ -319,8 +462,14 @@ class MinMaxScanOption(RangeScanOption):
 
 
 class CentreSpanScanOption(RangeScanOption):
+    option_tooltip = (
+        "Scan symmetrically around a centre using a half-span, on either a finite "
+        "grid or an infinitely refining grid."
+    )
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box_centre = self._make_spin_box()
+        self.box_centre.setToolTip("Centre value")
         layout.addWidget(self.box_centre)
         layout.setStretchFactor(self.box_centre, 1)
 
@@ -329,6 +478,7 @@ class CentreSpanScanOption(RangeScanOption):
         layout.setStretchFactor(self.plusminus, 0)
 
         self.box_half_span = self._make_spin_box(set_limits_from_spec=False)
+        self.box_half_span.setToolTip("Half-span around the centre value")
         layout.addWidget(self.box_half_span)
         layout.setStretchFactor(self.box_half_span, 1)
 
@@ -336,13 +486,29 @@ class CentreSpanScanOption(RangeScanOption):
 
         self._build_points_ui(layout)
 
+        self.box_centre.setValue(self._default_numeric_centre_value() / self.scale)
+        self.box_half_span.setValue(
+            self._default_numeric_half_span_value() / self.scale
+        )
+
     def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box_centre.setValue(sync_values[SyncValue.centre])
+        value = self._current_numeric_sync_value(sync_values)
+        if value is not None:
+            self.box_centre.setValue(value)
+        else:
+            self.box_centre.setValue(
+                self._default_numeric_centre_value() / self.scale
+            )
+
+        self.box_half_span.setValue(
+            self._default_numeric_half_span_value() / self.scale
+        )
+
         if SyncValue.num_points in sync_values:
             self.box_points.setValue(sync_values[SyncValue.num_points])
 
     def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.initial] = self.box_centre.value()
         sync_values[SyncValue.centre] = self.box_centre.value()
         sync_values[SyncValue.num_points] = self.box_points.value()
 
@@ -355,8 +521,14 @@ class CentreSpanScanOption(RangeScanOption):
             return False
 
         # Common to both finite/refining:
-        self.box_half_span.setValue((axis["range"].get("half_span", 0.0) / self.scale))
-        self.box_centre.setValue((axis["range"].get("centre", 0.0) / self.scale))
+        self.box_half_span.setValue(
+            axis["range"].get("half_span", self._default_numeric_half_span_value())
+            / self.scale
+        )
+        self.box_centre.setValue(
+            axis["range"].get("centre", self._default_numeric_centre_value())
+            / self.scale
+        )
         self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
         return True
 
@@ -378,9 +550,11 @@ class CentreSpanScanOption(RangeScanOption):
 
 class ExpandingScanOption(NumericScanOption):
     execution_modes = frozenset({"scan"})
+    option_tooltip = "Scan outward from a centre with a fixed spacing between steps."
 
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box_centre = self._make_spin_box()
+        self.box_centre.setToolTip("Centre value")
         layout.addWidget(self.box_centre)
         layout.setStretchFactor(self.box_centre, 1)
 
@@ -394,8 +568,12 @@ class ExpandingScanOption(NumericScanOption):
 
         self.box_spacing = self._make_spin_box()
         self.box_spacing.setSuffix(self.box_spacing.suffix() + " steps")
+        self.box_spacing.setToolTip("Spacing between neighbouring scan points")
         layout.addWidget(self.box_spacing)
         layout.setStretchFactor(self.box_spacing, 1)
+
+        self.box_centre.setValue(self._default_numeric_centre_value() / self.scale)
+        self.box_spacing.setValue(self._default_numeric_step_value() / self.scale)
 
     def write_to_params(self, params: dict) -> None:
         schema = self.schema
@@ -414,23 +592,34 @@ class ExpandingScanOption(NumericScanOption):
         params["scan"].setdefault("axes", []).append(spec)
 
     def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box_centre.setValue(sync_values[SyncValue.centre])
+        value = self._current_numeric_sync_value(sync_values)
+        if value is not None:
+            self.box_centre.setValue(value)
+        else:
+            self.box_centre.setValue(self._default_numeric_centre_value() / self.scale)
 
     def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.initial] = self.box_centre.value()
         sync_values[SyncValue.centre] = self.box_centre.value()
 
     def attempt_read_from_axis(self, axis: dict) -> bool:
         if axis["type"] != "expanding":
             return False
-        self.box_centre.setValue(axis["range"].get("centre", 0.0) / self.scale)
-        self.box_spacing.setValue(axis["range"].get("spacing", 0.0) / self.scale)
+        self.box_centre.setValue(
+            axis["range"].get("centre", self._default_numeric_centre_value())
+            / self.scale
+        )
+        self.box_spacing.setValue(
+            axis["range"].get("spacing", self._default_numeric_step_value())
+            / self.scale
+        )
         self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
         return True
 
 
 class ListScanOption(NumericScanOption):
     execution_modes = frozenset({"scan"})
+    option_tooltip = "Scan an explicit list of values."
 
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         class Validator(QtGui.QValidator):
@@ -443,6 +632,7 @@ class ListScanOption(NumericScanOption):
 
         self.box_pyon = QtWidgets.QLineEdit()
         self.box_pyon.setValidator(Validator(self))
+        self.box_pyon.setToolTip("Comma-separated list of scan values")
         layout.addWidget(self.box_pyon)
 
         layout.addWidget(make_divider())
@@ -480,12 +670,14 @@ class ListScanOption(NumericScanOption):
 
 class BoolScanOption(ScanOption):
     execution_modes = frozenset({"scan"})
+    option_tooltip = "Scan both boolean values, false and true."
 
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         dummy_box = QtWidgets.QCheckBox()
         dummy_box.setTristate()
         dummy_box.setEnabled(False)
         dummy_box.setChecked(True)
+        dummy_box.setToolTip("Boolean scan covers both false and true")
         layout.addWidget(dummy_box)
         layout.setStretchFactor(dummy_box, 0)
         layout.addWidget(make_divider())
@@ -514,6 +706,7 @@ class BoolScanOption(ScanOption):
 
 class EnumScanOption(ScanOption):
     execution_modes = frozenset({"scan"})
+    option_tooltip = "Scan across all enum members."
 
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.check_randomise = self.make_randomise_box()
@@ -541,23 +734,54 @@ class EnumScanOption(ScanOption):
 
 class OptimizeAxisOption(NumericScanOption):
     execution_modes = frozenset({"optimise"})
+    option_tooltip = (
+        "Optimise this parameter between lower and upper bounds, starting from the "
+        "initial value."
+    )
 
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
+        lower_label = make_icon_label(
+            QtWidgets.QStyle.StandardPixmap.SP_ArrowDown, "Lower bound"
+        )
+        layout.addWidget(lower_label)
+        layout.setStretchFactor(lower_label, 0)
+
         self.box_min = self._make_spin_box()
+        self.box_min.setToolTip("Lower bound")
         layout.addWidget(self.box_min)
         layout.setStretchFactor(self.box_min, 1)
 
         layout.addWidget(make_divider())
 
+        initial_label = make_icon_label(
+            QtWidgets.QStyle.StandardPixmap.SP_MediaPlay, "Initial value"
+        )
+        layout.addWidget(initial_label)
+        layout.setStretchFactor(initial_label, 0)
+
         self.box_initial = self._make_spin_box()
+        self.box_initial.setToolTip("Initial value")
         layout.addWidget(self.box_initial)
         layout.setStretchFactor(self.box_initial, 1)
 
         layout.addWidget(make_divider())
 
+        upper_label = make_icon_label(
+            QtWidgets.QStyle.StandardPixmap.SP_ArrowUp, "Upper bound"
+        )
+        layout.addWidget(upper_label)
+        layout.setStretchFactor(upper_label, 0)
+
         self.box_max = self._make_spin_box()
+        self.box_max.setToolTip("Upper bound")
         layout.addWidget(self.box_max)
         layout.setStretchFactor(self.box_max, 1)
+
+        self.box_min.setValue(self._default_numeric_spec_value("min") / self.scale)
+        default = self._default_numeric_param_value()
+        if default is not None:
+            self.box_initial.setValue(default / self.scale)
+        self.box_max.setValue(self._default_numeric_spec_value("max") / self.scale)
 
     def write_to_params(self, params: dict) -> None:
         spec = {
@@ -570,25 +794,31 @@ class OptimizeAxisOption(NumericScanOption):
         params.setdefault("optimise", {}).setdefault("parameters", []).append(spec)
 
     def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.lower in sync_values:
-            self.box_min.setValue(sync_values[SyncValue.lower])
-        if SyncValue.initial in sync_values:
-            self.box_initial.setValue(sync_values[SyncValue.initial])
-        elif SyncValue.centre in sync_values:
-            self.box_initial.setValue(sync_values[SyncValue.centre])
-        if SyncValue.upper in sync_values:
-            self.box_max.setValue(sync_values[SyncValue.upper])
+        self.box_min.setValue(self._default_numeric_spec_value("min") / self.scale)
+        value = self._current_numeric_sync_value(sync_values)
+        if value is not None:
+            self.box_initial.setValue(value)
+        else:
+            default = self._default_numeric_param_value()
+            if default is not None:
+                self.box_initial.setValue(default / self.scale)
+        self.box_max.setValue(self._default_numeric_spec_value("max") / self.scale)
 
     def write_sync_values(self, sync_values: dict) -> None:
-        sync_values[SyncValue.lower] = self.box_min.value()
         sync_values[SyncValue.initial] = self.box_initial.value()
         sync_values[SyncValue.centre] = self.box_initial.value()
-        sync_values[SyncValue.upper] = self.box_max.value()
 
     def attempt_read_from_optimise_parameter(self, parameter: dict) -> bool:
-        self.box_min.setValue(parameter.get("min", 0.0) / self.scale)
-        self.box_max.setValue(parameter.get("max", 0.0) / self.scale)
-        self.box_initial.setValue(parameter.get("initial", 0.0) / self.scale)
+        self.box_min.setValue(
+            parameter.get("min", self._default_numeric_spec_value("min")) / self.scale
+        )
+        self.box_max.setValue(
+            parameter.get("max", self._default_numeric_spec_value("max")) / self.scale
+        )
+        default = self._default_numeric_param_value()
+        self.box_initial.setValue(
+            parameter.get("initial", 0.0 if default is None else default) / self.scale
+        )
         return True
 
 

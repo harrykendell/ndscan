@@ -13,11 +13,12 @@ from .scan_runner import ScanAxis, select_runner_class
 
 __all__ = [
     "ObjectiveSpec",
-    "NelderMeadSpec",
+    "OptimizeAlgorithmSpec",
     "OptimizeAxis",
     "OptimizeSpec",
     "Optimizer",
     "NelderMeadOptimizer",
+    "CoordinateSearchOptimizer",
     "OptimizeRunner",
     "describe_optimise",
 ]
@@ -30,12 +31,11 @@ class ObjectiveSpec:
 
 
 @dataclass
-class NelderMeadSpec:
+class OptimizeAlgorithmSpec:
     kind: str = "nelder_mead"
     max_evals: int = 100
     xatol: float = 1e-3
     fatol: float = 1e-3
-
 
 @dataclass
 class OptimizeAxis:
@@ -51,28 +51,45 @@ class OptimizeAxis:
 class OptimizeSpec:
     axes: list[OptimizeAxis]
     objective: ObjectiveSpec
-    algorithm: NelderMeadSpec
+    algorithm: OptimizeAlgorithmSpec
 
 
 class Optimizer:
+    """Common ask/tell interface for sequential optimisers.
+
+    Implementations propose one point at a time via :meth:`ask`, then consume the
+    corresponding objective value via :meth:`tell`.
+    """
+
     def ask(self) -> tuple[float, ...] | None:
+        """Return the next point to evaluate, or ``None`` if no more are needed."""
         raise NotImplementedError
 
     def tell(self, point: tuple[float, ...], value: float) -> None:
+        """Report the objective value measured for a point returned by :meth:`ask`."""
         raise NotImplementedError
 
     def is_done(self) -> bool:
+        """Return whether the optimiser has terminated."""
         raise NotImplementedError
 
     def best(self) -> tuple[tuple[float, ...], float] | None:
+        """Return the best point/value pair seen so far, if any evaluations completed."""
         raise NotImplementedError
 
     def termination_reason(self) -> str | None:
+        """Return the termination reason, or ``None`` while the optimiser is active."""
         raise NotImplementedError
 
 
 class NelderMeadOptimizer(Optimizer):
-    """Sequential ask/tell Nelder-Mead implementation."""
+    """Sequential ask/tell Nelder-Mead implementation.
+
+    Nelder-Mead maintains a simplex of ``n + 1`` points for ``n`` parameters and improves
+    it through reflection, expansion, contraction, and shrink steps. It is a local,
+    derivative-free method that can work well on smooth objectives, but may need more
+    evaluations than simpler search methods and is sensitive to local minima.
+    """
 
     def __init__(
         self,
@@ -86,6 +103,7 @@ class NelderMeadOptimizer(Optimizer):
         self._initial = np.array(initial, dtype=float)
         self._lower = np.array(lower_bounds, dtype=float)
         self._upper = np.array(upper_bounds, dtype=float)
+        self._span = self._upper - self._lower
         self._max_evals = max_evals
         self._xatol = xatol
         self._fatol = fatol
@@ -171,13 +189,13 @@ class NelderMeadOptimizer(Optimizer):
     def _build_initial_simplex(self) -> list[np.ndarray]:
         if len(self._initial) == 0:
             raise ValueError("Need at least one optimization axis")
+        if np.any(self._span <= 0.0):
+            raise ValueError("Optimization bounds must satisfy min < max")
 
         simplex = [self._clip(self._initial.copy())]
         for i in range(len(self._initial)):
             point = self._initial.copy()
-            delta = 0.05 * (self._upper[i] - self._lower[i])
-            if delta <= 0:
-                raise ValueError("Optimization bounds must satisfy min < max")
+            delta = 0.05 * self._span[i]
             if point[i] + delta <= self._upper[i]:
                 point[i] += delta
             elif point[i] - delta >= self._lower[i]:
@@ -219,7 +237,9 @@ class NelderMeadOptimizer(Optimizer):
 
         best = self._simplex[0]
         best_value = self._values[0]
-        max_x_delta = max(np.max(np.abs(point - best)) for point in self._simplex[1:])
+        max_x_delta = max(
+            np.max(np.abs((point - best) / self._span)) for point in self._simplex[1:]
+        )
         max_f_delta = max(abs(value - best_value) for value in self._values[1:])
         if max_x_delta <= self._xatol and max_f_delta <= self._fatol:
             self._termination_reason = "converged"
@@ -337,6 +357,218 @@ class NelderMeadOptimizer(Optimizer):
             self._start_iteration()
 
 
+class CoordinateSearchOptimizer(Optimizer):
+    """Sequential bounded coordinate-search optimizer.
+
+    Coordinate search probes one axis at a time by stepping forward and backward within
+    the configured bounds, accepting any improving move and halving the step sizes when a
+    full pass yields no improvement. It is a simple derivative-free local search method
+    that is easy to reason about and often robust on separable or moderately coupled
+    objectives, though it can be slower on strongly rotated valleys.
+    """
+
+    def __init__(
+        self,
+        initial: tuple[float, ...],
+        lower_bounds: tuple[float, ...],
+        upper_bounds: tuple[float, ...],
+        max_evals: int,
+        xatol: float,
+        fatol: float,
+    ):
+        self._initial = np.array(initial, dtype=float)
+        self._lower = np.array(lower_bounds, dtype=float)
+        self._upper = np.array(upper_bounds, dtype=float)
+        self._span = self._upper - self._lower
+        self._max_evals = max_evals
+        self._xatol = xatol
+        self._fatol = fatol
+
+        if len(self._initial) == 0:
+            raise ValueError("Need at least one optimization axis")
+        if np.any(self._span <= 0.0):
+            raise ValueError("Optimization bounds must satisfy min < max")
+
+        self._num_asked = 0
+        self._termination_reason: str | None = None
+
+        self._current_point = self._clip(self._initial.copy())
+        self._current_value: float | None = None
+        self._best_point: np.ndarray | None = None
+        self._best_value: float | None = None
+
+        self._step_sizes = 0.25 * self._span
+        self._minimum_step = np.maximum(
+            self._xatol * self._span,
+            np.finfo(float).eps * np.maximum(1.0, self._span),
+        )
+
+        self._axis_index = 0
+        self._direction_index = 0
+        self._trial_candidates: list[tuple[np.ndarray, float]] = []
+        self._cycle_start_value: float | None = None
+        self._cycle_improved = False
+
+        self._pending_point: np.ndarray | None = None
+
+    def ask(self) -> tuple[float, ...] | None:
+        if self._termination_reason is not None:
+            return None
+
+        if self._num_asked >= self._max_evals:
+            self._termination_reason = "max_evals_reached"
+            return None
+
+        if self._current_value is None:
+            self._pending_point = self._current_point.copy()
+        else:
+            self._pending_point = None
+            self._prepare_next_point()
+            if self._pending_point is None:
+                return None
+
+        self._num_asked += 1
+        return tuple(self._pending_point.tolist())
+
+    def tell(self, point: tuple[float, ...], value: float) -> None:
+        del point
+
+        if self._termination_reason is not None or self._pending_point is None:
+            return
+
+        value = float(value)
+        pending_point = self._pending_point
+        self._pending_point = None
+
+        if self._current_value is None:
+            self._current_value = value
+            self._best_point = pending_point.copy()
+            self._best_value = value
+            self._cycle_start_value = value
+            return
+
+        if value < self._best_value:
+            self._best_point = pending_point.copy()
+            self._best_value = value
+
+        self._trial_candidates.append((pending_point.copy(), value))
+        self._direction_index += 1
+
+        if self._direction_index != 2:
+            return
+
+        best_candidate, best_value = min(self._trial_candidates, key=lambda p: p[1])
+        if best_value < self._current_value:
+            self._current_point = best_candidate
+            self._current_value = best_value
+            self._cycle_improved = True
+
+        self._trial_candidates.clear()
+        self._direction_index = 0
+        self._axis_index += 1
+        if self._axis_index == len(self._current_point):
+            self._finish_cycle()
+
+    def is_done(self) -> bool:
+        return self._termination_reason is not None
+
+    def best(self) -> tuple[tuple[float, ...], float] | None:
+        if self._best_point is None or self._best_value is None:
+            return None
+        return tuple(self._best_point.tolist()), float(self._best_value)
+
+    def termination_reason(self) -> str | None:
+        return self._termination_reason
+
+    def _clip(self, point: np.ndarray) -> np.ndarray:
+        return np.clip(point, self._lower, self._upper)
+
+    def _prepare_next_point(self) -> None:
+        while self._termination_reason is None:
+            if self._axis_index == len(self._current_point):
+                self._finish_cycle()
+                if self._termination_reason is not None:
+                    return
+                continue
+
+            axis = self._axis_index
+            direction = 1.0 if self._direction_index == 0 else -1.0
+            candidate = self._current_point.copy()
+            candidate[axis] = np.clip(
+                candidate[axis] + direction * self._step_sizes[axis],
+                self._lower[axis],
+                self._upper[axis],
+            )
+
+            if np.array_equal(candidate, self._current_point):
+                self._direction_index += 1
+                if self._direction_index == 2:
+                    self._direction_index = 0
+                    self._axis_index += 1
+                continue
+
+            self._pending_point = candidate
+            return
+
+    def _finish_cycle(self) -> None:
+        if self._current_value is None:
+            return
+
+        improvement = self._cycle_start_value - self._current_value
+        if self._cycle_improved:
+            if (
+                improvement <= self._fatol
+                and np.all(self._step_sizes <= self._minimum_step)
+            ):
+                self._termination_reason = "converged"
+                return
+        else:
+            if np.all(self._step_sizes <= self._minimum_step):
+                self._termination_reason = "converged"
+                return
+            self._step_sizes /= 2.0
+
+        self._axis_index = 0
+        self._direction_index = 0
+        self._trial_candidates.clear()
+        self._cycle_start_value = self._current_value
+        self._cycle_improved = False
+
+
+def minimum_optimizer_evaluations(kind: str, num_axes: int) -> int:
+    if kind == "nelder_mead":
+        return num_axes + 1
+    if kind == "coordinate_search":
+        return 1
+    raise ValueError(f"Unsupported optimisation algorithm '{kind}'")
+
+
+def create_optimizer(spec: OptimizeSpec) -> Optimizer:
+    initial = tuple(axis.initial for axis in spec.axes)
+    lower_bounds = tuple(axis.lower for axis in spec.axes)
+    upper_bounds = tuple(axis.upper for axis in spec.axes)
+
+    if spec.algorithm.kind == "nelder_mead":
+        return NelderMeadOptimizer(
+            initial,
+            lower_bounds,
+            upper_bounds,
+            spec.algorithm.max_evals,
+            spec.algorithm.xatol,
+            spec.algorithm.fatol,
+        )
+    if spec.algorithm.kind == "coordinate_search":
+        return CoordinateSearchOptimizer(
+            initial,
+            lower_bounds,
+            upper_bounds,
+            spec.algorithm.max_evals,
+            spec.algorithm.xatol,
+            spec.algorithm.fatol,
+        )
+    raise ValueError(f"Unsupported optimisation algorithm '{spec.algorithm.kind}'")
+
+
 class OptimizeRunner(HasEnvironment):
     def build(
         self,
@@ -359,23 +591,19 @@ class OptimizeRunner(HasEnvironment):
         on_best_updated: Callable[[tuple[float, ...], float], None] | None = None,
         on_terminated: Callable[[str], None] | None = None,
     ) -> None:
-        optimizer = NelderMeadOptimizer(
-            tuple(axis.initial for axis in spec.axes),
-            tuple(axis.lower for axis in spec.axes),
-            tuple(axis.upper for axis in spec.axes),
-            spec.algorithm.max_evals,
-            spec.algorithm.xatol,
-            spec.algorithm.fatol,
-        )
+        optimizer = create_optimizer(spec)
 
         point_runner = select_runner_class(fragment)(
             self,
             max_rtio_underflow_retries=self.max_rtio_underflow_retries,
             max_transitory_error_retries=self.max_transitory_error_retries,
-            skip_on_persistent_transitory_error=self.skip_on_persistent_transitory_error,
+            skip_on_persistent_transitory_error=(
+                self.skip_on_persistent_transitory_error
+            ),
         )
         scan_axes = [
-            ScanAxis(axis.param_schema, axis.path, axis.param_store) for axis in spec.axes
+            ScanAxis(axis.param_schema, axis.path, axis.param_store)
+            for axis in spec.axes
         ]
         point_runner.setup(fragment, scan_axes, axis_sinks)
 
