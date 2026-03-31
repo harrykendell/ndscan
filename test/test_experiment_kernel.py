@@ -795,3 +795,46 @@ class KernelOptimizeCase(KernelEmulatorCase):
             self.dataset_db.get("ndscan.rid_0.optimizer.best_axis_1"), -0.5, places=2
         )
         self.assertLess(self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 1e-4)
+
+    def test_kernel_fragment_coordinate_search_optimise(self):
+        exp = self.create(KernelQuadraticFragmentScan)
+        exp.args._params["execution_mode"] = "optimise"
+        exp.args._params["optimise"] = {
+            "parameters": [
+                {
+                    "fqn": "test_experiment_kernel.KernelQuadraticFragment.x",
+                    "path": "*",
+                    "min": -5.0,
+                    "max": 5.0,
+                    "initial": 4.0,
+                },
+                {
+                    "fqn": "test_experiment_kernel.KernelQuadraticFragment.y",
+                    "path": "*",
+                    "min": -5.0,
+                    "max": 5.0,
+                    "initial": -4.0,
+                }
+            ],
+            "objective": {"channel": "objective", "direction": "min"},
+            "algorithm": {
+                "kind": "coordinate_search",
+                "max_evals": 120,
+                "xatol": 1e-4,
+                "fatol": 1e-6,
+            },
+            "skip_on_persistent_transitory_error": False,
+        }
+        exp.prepare()
+        exp.run()
+
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.kind"), "coordinate_search"
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_axis_0"), 1.25, places=2
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_axis_1"), -0.5, places=2
+        )
+        self.assertLess(self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 1e-4)

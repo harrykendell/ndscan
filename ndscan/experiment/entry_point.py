@@ -48,12 +48,13 @@ from .fragment import (
     TransitoryError,
 )
 from .optimize import (
-    NelderMeadSpec,
+    OptimizeAlgorithmSpec,
     ObjectiveSpec,
     OptimizeAxis,
     OptimizeRunner,
     OptimizeSpec,
     describe_optimise,
+    minimum_optimizer_evaluations,
 )
 from .parameters import ParamBase, ParamStore
 from .result_channels import (
@@ -405,8 +406,10 @@ class ArgumentInterface(HasEnvironment):
         fatol = float(algorithm.get("fatol", 1e-3))
         if max_evals < 1:
             raise ScanSpecError("Optimisation max_evals must be positive")
-        if xatol < 0.0:
-            raise ScanSpecError("Optimisation xatol must be non-negative")
+        if xatol < 0.0 or xatol > 1.0:
+            raise ScanSpecError(
+                "Optimisation xatol must be between 0 and 1 (fraction of span)"
+            )
         if fatol < 0.0:
             raise ScanSpecError("Optimisation fatol must be non-negative")
         spec = OptimizeSpec(
@@ -415,7 +418,7 @@ class ArgumentInterface(HasEnvironment):
                 objective.get("channel", ""),
                 objective.get("direction", "min"),
             ),
-            NelderMeadSpec(
+            OptimizeAlgorithmSpec(
                 algorithm.get("kind", "nelder_mead"),
                 max_evals,
                 xatol,
@@ -535,13 +538,16 @@ class TopLevelRunner(HasEnvironment):
                 raise ScanSpecError(
                     "Optimisation objective direction must be 'min' or 'max'"
                 )
-            if self.spec.algorithm.kind != "nelder_mead":
+            try:
+                min_evals = minimum_optimizer_evaluations(
+                    self.spec.algorithm.kind, len(self.spec.axes)
+                )
+            except ValueError as exc:
                 raise ScanSpecError(
-                    f"Unsupported optimisation algorithm '{self.spec.algorithm.kind}'"
+                    str(exc)
                 )
             if not self.spec.axes:
                 raise ScanSpecError("Optimisation requires at least one parameter")
-            min_evals = len(self.spec.axes) + 1
             if self.spec.algorithm.max_evals < min_evals:
                 raise ScanSpecError(
                     "Optimisation max_evals must be at least "
