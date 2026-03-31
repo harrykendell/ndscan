@@ -255,20 +255,15 @@ class OnlineFit(DefaultAnalysis):
         try:
             params = FIT_OBJECTS[fit_type].all_parameter_names
         except AttributeError:
-            # For backwards-compatibility with older oitg versions
-            # If explicitly requested to save fit results, then get all non-derived params
-            if save_fit_results is True:
-                logger.warning(
-                    "Derived parameters not accessible in installed version of oitg. "
-                    "Consider upgrading.",
-                    fit_type,
-                    exc_info=True,
-                )
-                params = FIT_OBJECTS[fit_type].parameter_names
-            else:
-                # If none specified and oitg version does not support derived_parameter_names,
-                # do not save results
-                save_fit_results = False
+            # Fall back to the base fit parameters for older oitg versions that do not
+            # expose derived parameter names yet. This keeps the standard fit results
+            # available, even if any extra derived results cannot be saved.
+            logger.warning(
+                "Derived parameters not accessible in installed version of oitg. "
+                "Saving only base fit parameters for '%s'. Consider upgrading.",
+                fit_type,
+            )
+            params = FIT_OBJECTS[fit_type].parameter_names
         self._save_fit_results = (save_fit_results is None) or save_fit_results
 
         self._result_channels = {}
