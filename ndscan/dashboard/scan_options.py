@@ -44,6 +44,7 @@ class SyncValue(Enum):
     centre = "centre"
     lower = "lower"
     upper = "upper"
+    initial = "initial"
     num_points = "num_points"
 
 
@@ -54,6 +55,7 @@ class ScanOption(QtCore.QObject):
     """
 
     value_changed = QtCore.pyqtSignal()
+    execution_modes = frozenset({"scan", "optimise"})
 
     def __init__(self, schema: dict[str, Any], path: str):
         super().__init__()
@@ -73,6 +75,9 @@ class ScanOption(QtCore.QObject):
         pass
 
     def attempt_read_from_axis(self, axis: dict) -> bool:
+        return False
+
+    def attempt_read_from_optimise_parameter(self, parameter: dict) -> bool:
         return False
 
     def make_randomise_box(self):
@@ -247,6 +252,8 @@ class RangeScanOption(NumericScanOption):
         self.write_type_and_range(spec)
         params["scan"].setdefault("axes", []).append(spec)
 
+    execution_modes = frozenset({"scan"})
+
 
 class MinMaxScanOption(RangeScanOption):
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
@@ -370,6 +377,8 @@ class CentreSpanScanOption(RangeScanOption):
 
 
 class ExpandingScanOption(NumericScanOption):
+    execution_modes = frozenset({"scan"})
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box_centre = self._make_spin_box()
         layout.addWidget(self.box_centre)
@@ -421,6 +430,8 @@ class ExpandingScanOption(NumericScanOption):
 
 
 class ListScanOption(NumericScanOption):
+    execution_modes = frozenset({"scan"})
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         class Validator(QtGui.QValidator):
             def validate(self, input, pos):
@@ -468,6 +479,8 @@ class ListScanOption(NumericScanOption):
 
 
 class BoolScanOption(ScanOption):
+    execution_modes = frozenset({"scan"})
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         dummy_box = QtWidgets.QCheckBox()
         dummy_box.setTristate()
@@ -500,6 +513,8 @@ class BoolScanOption(ScanOption):
 
 
 class EnumScanOption(ScanOption):
+    execution_modes = frozenset({"scan"})
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.check_randomise = self.make_randomise_box()
         layout.addWidget(self.check_randomise)
@@ -521,6 +536,59 @@ class EnumScanOption(ScanOption):
         if axis["type"] != "list":
             return False
         self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
+        return True
+
+
+class OptimizeAxisOption(NumericScanOption):
+    execution_modes = frozenset({"optimise"})
+
+    def build_ui(self, layout: QtWidgets.QLayout) -> None:
+        self.box_min = self._make_spin_box()
+        layout.addWidget(self.box_min)
+        layout.setStretchFactor(self.box_min, 1)
+
+        layout.addWidget(make_divider())
+
+        self.box_initial = self._make_spin_box()
+        layout.addWidget(self.box_initial)
+        layout.setStretchFactor(self.box_initial, 1)
+
+        layout.addWidget(make_divider())
+
+        self.box_max = self._make_spin_box()
+        layout.addWidget(self.box_max)
+        layout.setStretchFactor(self.box_max, 1)
+
+    def write_to_params(self, params: dict) -> None:
+        spec = {
+            "fqn": self.schema["fqn"],
+            "path": self.path,
+            "min": self.box_min.value() * self.scale,
+            "max": self.box_max.value() * self.scale,
+            "initial": self.box_initial.value() * self.scale,
+        }
+        params.setdefault("optimise", {}).setdefault("parameters", []).append(spec)
+
+    def read_sync_values(self, sync_values: dict) -> None:
+        if SyncValue.lower in sync_values:
+            self.box_min.setValue(sync_values[SyncValue.lower])
+        if SyncValue.initial in sync_values:
+            self.box_initial.setValue(sync_values[SyncValue.initial])
+        elif SyncValue.centre in sync_values:
+            self.box_initial.setValue(sync_values[SyncValue.centre])
+        if SyncValue.upper in sync_values:
+            self.box_max.setValue(sync_values[SyncValue.upper])
+
+    def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.lower] = self.box_min.value()
+        sync_values[SyncValue.initial] = self.box_initial.value()
+        sync_values[SyncValue.centre] = self.box_initial.value()
+        sync_values[SyncValue.upper] = self.box_max.value()
+
+    def attempt_read_from_optimise_parameter(self, parameter: dict) -> bool:
+        self.box_min.setValue(parameter.get("min", 0.0) / self.scale)
+        self.box_max.setValue(parameter.get("max", 0.0) / self.scale)
+        self.box_initial.setValue(parameter.get("initial", 0.0) / self.scale)
         return True
 
 
@@ -553,4 +621,6 @@ def list_scan_option_types(
             result["Centered"] = CentreSpanScanOption
             result["Expanding"] = ExpandingScanOption
             result["List"] = ListScanOption
+            if schema_type == "float":
+                result["Optimise"] = OptimizeAxisOption
     return result

@@ -31,6 +31,7 @@ from artiq.language import (
 )
 
 from ..utils import (
+    ExecutionMode,
     PARAMS_ARG_KEY,
     SCHEMA_REVISION,
     SCHEMA_REVISION_KEY,
@@ -46,10 +47,19 @@ from .fragment import (
     RestartKernelTransitoryError,
     TransitoryError,
 )
+from .optimize import (
+    NelderMeadSpec,
+    ObjectiveSpec,
+    OptimizeAxis,
+    OptimizeRunner,
+    OptimizeSpec,
+    describe_optimise,
+)
 from .parameters import ParamBase, ParamStore
 from .result_channels import (
     AppendingDatasetSink,
     LastValueSink,
+    NumericChannel,
     ResultChannel,
     ScalarDatasetSink,
 )
@@ -81,6 +91,40 @@ if "sphinx" in sys.modules:
     __all__.append("FragmentScanExperiment")
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_ndscan_params(default_params: dict[str, Any], state_params: dict[str, Any]):
+    params = default_params.copy()
+
+    for key in [
+        "execution_mode",
+        "scan",
+        "optimise",
+        "overrides",
+    ]:
+        if key in state_params:
+            params[key] = state_params[key]
+
+    if "scan" in default_params:
+        scan = default_params["scan"].copy()
+        scan.update(state_params.get("scan", {}))
+        params["scan"] = scan
+
+    if "optimise" in default_params:
+        optimise = default_params["optimise"].copy()
+        optimise.update(state_params.get("optimise", {}))
+
+        objective = default_params["optimise"].get("objective", {}).copy()
+        objective.update(state_params.get("optimise", {}).get("objective", {}))
+        optimise["objective"] = objective
+
+        algorithm = default_params["optimise"].get("algorithm", {}).copy()
+        algorithm.update(state_params.get("optimise", {}).get("algorithm", {}))
+        optimise["algorithm"] = algorithm
+
+        params["optimise"] = optimise
+
+    return params
 
 
 class ScanSpecError(Exception):
@@ -137,9 +181,12 @@ class FragmentScanExperiment(EnvExperiment):
         """
         param_stores = self.args.make_override_stores()
 
-        spec, no_axes_mode, skip_on_persistent_transitory_error = (
-            self.args.make_scan_spec()
-        )
+        (
+            execution_mode,
+            spec,
+            no_axes_mode,
+            skip_on_persistent_transitory_error,
+        ) = self.args.make_execution_spec()
         for ax in spec.axes:
             fqn = ax.param_schema["fqn"]
             param_stores.setdefault(fqn, []).append((ax.path, ax.param_store))
@@ -165,6 +212,7 @@ class FragmentScanExperiment(EnvExperiment):
         self.tlr = TopLevelRunner(
             self,
             fragment=self.fragment,
+            execution_mode=execution_mode,
             spec=spec,
             no_axes_mode=no_axes_mode,
             max_rtio_underflow_retries=self.max_rtio_underflow_retries,
@@ -215,14 +263,38 @@ class ArgumentInterface(HasEnvironment):
             "always_shown": always_shown_params,
             "overrides": {},
         }
+        result_channels = {}
+        for fragment in fragments:
+            fragment._collect_result_channels(result_channels)
+        desc["result_channels"] = {
+            path: channel.describe()
+            for path, channel in result_channels.items()
+            if channel.save_by_default
+        }
         if scannable:
+            desc["execution_mode"] = ExecutionMode.scan.name
             desc["scan"] = {
                 "axes": [],
                 "num_repeats": 1,
+                "num_repeats_per_point": 1,
                 "no_axes_mode": "single",
                 "randomise_order_globally": False,
+                "skip_on_persistent_transitory_error": False,
             }
-        self._params = self.get_argument(PARAMS_ARG_KEY, PYONValue(default=desc))
+            desc["optimise"] = {
+                "parameters": [],
+                "objective": {"channel": "", "direction": "min"},
+                "algorithm": {
+                    "kind": "nelder_mead",
+                    "max_evals": 100,
+                    "xatol": 1e-3,
+                    "fatol": 1e-3,
+                },
+                "skip_on_persistent_transitory_error": False,
+            }
+        self._params = _merge_ndscan_params(
+            desc, self.get_argument(PARAMS_ARG_KEY, PYONValue(default=desc))
+        )
 
     def make_override_stores(self) -> dict[str, list[tuple[str, ParamStore]]]:
         stores = {}
@@ -247,6 +319,18 @@ class ArgumentInterface(HasEnvironment):
             ]
         return stores
 
+    def _make_store_for_value(self, fqn: str, pathspec: str, value) -> ParamStore:
+        try:
+            store_type = self._sample_instances[fqn].StoreType
+        except KeyError:
+            raise KeyError(
+                "Experiment does not have parameters matching "
+                f"axis/optimization parameter with FQN '{fqn}' "
+                + "(likely due to outdated argument editor after "
+                + "changes to experiment; try Recompute All Arguments)"
+            )
+        return store_type((fqn, pathspec), store_type.value_from_pyon(value))
+
     def make_scan_spec(self) -> tuple[ScanSpec, NoAxesMode, bool]:
         scan = self._params.get("scan", {})
 
@@ -264,17 +348,8 @@ class ArgumentInterface(HasEnvironment):
             fqn = axspec["fqn"]
             pathspec = axspec["path"]
 
-            try:
-                store_type = self._sample_instances[fqn].StoreType
-            except KeyError:
-                raise KeyError(
-                    "Experiment does not have parameters matching "
-                    f"scan axis with FQN '{fqn}' "
-                    + "(likely due to outdated argument editor after "
-                    + "changes to experiment; try Recompute All Arguments)"
-                )
             first_value = generator.points_for_level(0, random)[0]
-            store = store_type((fqn, pathspec), store_type.value_from_pyon(first_value))
+            store = self._make_store_for_value(fqn, pathspec, first_value)
             axes.append(ScanAxis(self._schemata[fqn], pathspec, store))
 
         options = ScanOptions(
@@ -289,19 +364,96 @@ class ArgumentInterface(HasEnvironment):
         )
         return spec, no_axes_mode, skip_on_persistent_transitory_error
 
+    def make_optimise_spec(self) -> tuple[OptimizeSpec, bool]:
+        optimise = self._params.get("optimise", {})
+
+        axes = []
+        for paramspec in optimise.get("parameters", []):
+            fqn = paramspec["fqn"]
+            pathspec = paramspec["path"]
+            schema = self._schemata[fqn]
+            if schema["type"] != "float":
+                raise ScanSpecError(
+                    f"Optimisation currently only supports float parameters, got '{fqn}'"
+                )
+            lower = float(paramspec["min"])
+            upper = float(paramspec["max"])
+            initial = float(paramspec["initial"])
+            if not lower < upper:
+                raise ScanSpecError(
+                    f"Optimisation bounds for '{fqn}' must satisfy min < max"
+                )
+            if initial < lower or initial > upper:
+                raise ScanSpecError(
+                    f"Optimisation initial value for '{fqn}' must lie within bounds"
+                )
+            axes.append(
+                OptimizeAxis(
+                    schema,
+                    pathspec,
+                    self._make_store_for_value(fqn, pathspec, initial),
+                    lower,
+                    upper,
+                    initial,
+                )
+            )
+
+        objective = optimise.get("objective", {})
+        algorithm = optimise.get("algorithm", {})
+        max_evals = int(algorithm.get("max_evals", 100))
+        xatol = float(algorithm.get("xatol", 1e-3))
+        fatol = float(algorithm.get("fatol", 1e-3))
+        if max_evals < 1:
+            raise ScanSpecError("Optimisation max_evals must be positive")
+        if xatol < 0.0:
+            raise ScanSpecError("Optimisation xatol must be non-negative")
+        if fatol < 0.0:
+            raise ScanSpecError("Optimisation fatol must be non-negative")
+        spec = OptimizeSpec(
+            axes,
+            ObjectiveSpec(
+                objective.get("channel", ""),
+                objective.get("direction", "min"),
+            ),
+            NelderMeadSpec(
+                algorithm.get("kind", "nelder_mead"),
+                max_evals,
+                xatol,
+                fatol,
+            ),
+        )
+        return spec, optimise.get("skip_on_persistent_transitory_error", False)
+
+    def make_execution_spec(
+        self,
+    ) -> tuple[ExecutionMode, ScanSpec | OptimizeSpec, NoAxesMode, bool]:
+        mode = ExecutionMode[self._params.get("execution_mode", ExecutionMode.scan.name)]
+        if mode == ExecutionMode.optimise:
+            spec, skip = self.make_optimise_spec()
+            return mode, spec, NoAxesMode.single, skip
+
+        spec, no_axes_mode, skip = self.make_scan_spec()
+        return mode, spec, no_axes_mode, skip
+
 
 class TopLevelRunner(HasEnvironment):
     def build(
         self,
         fragment: ExpFragment,
-        spec: ScanSpec,
+        execution_mode: ExecutionMode | ScanSpec | OptimizeSpec,
+        spec: ScanSpec | OptimizeSpec | None = None,
         no_axes_mode: NoAxesMode = NoAxesMode.single,
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
         dataset_prefix: str | None = None,
         skip_on_persistent_transitory_error: bool = False,
     ):
+        if spec is None:
+            spec = execution_mode
+            execution_mode = ExecutionMode.scan
+
         self.fragment = fragment
+        self.execution_mode = execution_mode
         self.spec = spec
         self.max_rtio_underflow_retries = max_rtio_underflow_retries
         self.max_transitory_error_retries = max_transitory_error_retries
@@ -324,7 +476,7 @@ class TopLevelRunner(HasEnvironment):
         self._continue_running = False
         self._is_time_series = False
 
-        if not self.spec.axes:
+        if self.execution_mode == ExecutionMode.scan and not self.spec.axes:
             self._continue_running = no_axes_mode != NoAxesMode.single
             if no_axes_mode == NoAxesMode.time_series:
                 self._is_time_series = True
@@ -360,6 +512,42 @@ class TopLevelRunner(HasEnvironment):
             channel.set_sink(sink)
             self._scan_result_sinks[channel] = sink
 
+        self._objective_channel = None
+        if self.execution_mode == ExecutionMode.optimise:
+            objective_path = self.spec.objective.channel
+            if not objective_path:
+                raise ScanSpecError("Optimisation objective channel must be specified")
+            try:
+                self._objective_channel = chan_dict[objective_path]
+            except KeyError:
+                raise ScanSpecError(
+                    f"Optimisation objective channel '{objective_path}' does not exist"
+                )
+            if not self._objective_channel.save_by_default:
+                raise ScanSpecError(
+                    "Optimisation objective channel must be saved by default"
+                )
+            if not isinstance(self._objective_channel, NumericChannel):
+                raise ScanSpecError(
+                    "Optimisation objective channel must be numeric (float or int)"
+                )
+            if self.spec.objective.direction not in {"min", "max"}:
+                raise ScanSpecError(
+                    "Optimisation objective direction must be 'min' or 'max'"
+                )
+            if self.spec.algorithm.kind != "nelder_mead":
+                raise ScanSpecError(
+                    f"Unsupported optimisation algorithm '{self.spec.algorithm.kind}'"
+                )
+            if not self.spec.axes:
+                raise ScanSpecError("Optimisation requires at least one parameter")
+            min_evals = len(self.spec.axes) + 1
+            if self.spec.algorithm.max_evals < min_evals:
+                raise ScanSpecError(
+                    "Optimisation max_evals must be at least "
+                    f"{min_evals} for {len(self.spec.axes)} parameters"
+                )
+
         # Filter analyses, set up analysis result channels, and keep track of all the
         # names in the annotation context.
         self._analyses = (
@@ -388,6 +576,7 @@ class TopLevelRunner(HasEnvironment):
         )
 
         self._coordinate_sinks = None
+        self._optimizer_termination_reason = None
 
         self.fragment.prepare()
 
@@ -395,19 +584,35 @@ class TopLevelRunner(HasEnvironment):
         """Run the (possibly trivial) scan."""
         self._broadcast_metadata()
 
-        if not self.spec.axes and not self._is_time_series:
-            self._run_continuous()
-            return None, {c: s.get_last() for c, s in self._scan_result_sinks.items()}
+        if self.execution_mode == ExecutionMode.scan:
+            if not self.spec.axes and not self._is_time_series:
+                self._run_continuous()
+                return None, {
+                    c: s.get_last() for c, s in self._scan_result_sinks.items()
+                }
 
-        if self._is_time_series:
-            self._timestamp_sink = AppendingDatasetSink(
-                self, self.dataset_prefix + "points.axis_0"
-            )
-            self._coordinate_sinks = [self._timestamp_sink]
-            self._time_series_start = time.monotonic()
-            self._run_continuous()
+            if self._is_time_series:
+                self._timestamp_sink = AppendingDatasetSink(
+                    self, self.dataset_prefix + "points.axis_0"
+                )
+                self._coordinate_sinks = [self._timestamp_sink]
+                self._time_series_start = time.monotonic()
+                self._run_continuous()
+            else:
+                runner = select_runner_class(self.fragment)(
+                    self,
+                    max_rtio_underflow_retries=self.max_rtio_underflow_retries,
+                    max_transitory_error_retries=self.max_transitory_error_retries,
+                    skip_on_persistent_transitory_error=self.skip_on_persistent_transitory_error,
+                )
+                self._coordinate_sinks = [
+                    AppendingDatasetSink(self, self.dataset_prefix + f"points.axis_{i}")
+                    for i in range(len(self.spec.axes))
+                ]
+                runner.run(self.fragment, self.spec, self._coordinate_sinks)
+                self._set_completed()
         else:
-            runner = select_runner_class(self.fragment)(
+            runner = OptimizeRunner(
                 self,
                 max_rtio_underflow_retries=self.max_rtio_underflow_retries,
                 max_transitory_error_retries=self.max_transitory_error_retries,
@@ -417,7 +622,14 @@ class TopLevelRunner(HasEnvironment):
                 AppendingDatasetSink(self, self.dataset_prefix + f"points.axis_{i}")
                 for i in range(len(self.spec.axes))
             ]
-            runner.run(self.fragment, self.spec, self._coordinate_sinks)
+            runner.run(
+                self.fragment,
+                self.spec,
+                self._coordinate_sinks,
+                self._objective_channel,
+                self._update_optimizer_best,
+                self._set_optimizer_termination_reason,
+            )
             self._set_completed()
 
         return self._make_coordinate_dict(), self._make_value_dict()
@@ -564,6 +776,25 @@ class TopLevelRunner(HasEnvironment):
                 self.dataset_prefix + "point_phase", self._point_phase, broadcast=True
             )
 
+    def _update_optimizer_best(self, point: tuple[float, ...], value: float):
+        self.set_dataset(
+            self.dataset_prefix + "optimizer.best_value", value, broadcast=True
+        )
+        for i, axis_value in enumerate(point):
+            self.set_dataset(
+                self.dataset_prefix + f"optimizer.best_axis_{i}",
+                axis_value,
+                broadcast=True,
+            )
+
+    def _set_optimizer_termination_reason(self, reason: str):
+        self._optimizer_termination_reason = reason
+        self.set_dataset(
+            self.dataset_prefix + "optimizer.termination_reason",
+            reason,
+            broadcast=True,
+        )
+
     def _set_completed(self):
         self.set_dataset(self.dataset_prefix + "completed", True, broadcast=True)
 
@@ -577,10 +808,22 @@ class TopLevelRunner(HasEnvironment):
         push("source_id", f"{source_prefix}_{self.scheduler.rid}")
 
         push("completed", False)
+        push("execution_mode", self.execution_mode.name)
 
-        self._scan_desc = describe_scan(
-            self.spec, self.fragment, self._short_child_channel_names
-        )
+        if self.execution_mode == ExecutionMode.optimise:
+            self._scan_desc = describe_optimise(
+                self.spec, self.fragment, self._short_child_channel_names
+            )
+            push("optimizer.kind", self.spec.algorithm.kind)
+            push("optimizer.objective_channel", self.spec.objective.channel)
+            push("optimizer.objective_direction", self.spec.objective.direction)
+            push("optimizer.max_evals", self.spec.algorithm.max_evals)
+            push("optimizer.xatol", self.spec.algorithm.xatol)
+            push("optimizer.fatol", self.spec.algorithm.fatol)
+        else:
+            self._scan_desc = describe_scan(
+                self.spec, self.fragment, self._short_child_channel_names
+            )
         self._scan_desc.update(
             describe_analyses(self._analyses, self._annotation_context)
         )

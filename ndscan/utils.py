@@ -47,6 +47,12 @@ SCHEMA_REVISION_KEY = "ndscan_schema_revision"
 
 
 @unique
+class ExecutionMode(Enum):
+    scan = "Scan"
+    optimise = "Optimise"
+
+
+@unique
 class NoAxesMode(Enum):
     """Behaviours when launching an experiment with no parameter to be scanned."""
 
