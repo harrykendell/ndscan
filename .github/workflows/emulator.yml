@@ -3,6 +3,7 @@ name: core device emulator
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
@@ -17,4 +18,4 @@ jobs:
       - name: Prepare Nix ARTIQ environment
         run: nix build --accept-flake-config .github/artiq-emulator#devShells.x86_64-linux.default
       - name: Run unit tests with core device emulator
-        run: ARTIQ_ROOT=$GITHUB_WORKSPACE/.github/artiq-emulator nix develop --accept-flake-config .github/artiq-emulator#devShells.x86_64-linux.default --command python -m unittest discover -v test
+        run: NDSCAN_SKIP_GUI=1 ARTIQ_ROOT=$GITHUB_WORKSPACE/.github/artiq-emulator nix develop --accept-flake-config .github/artiq-emulator#devShells.x86_64-linux.default --command python -m unittest discover -v test
