@@ -61,10 +61,22 @@ class IntAxisFragment(ExpFragment):
         self.objective.push(float((self.x.get() - 1) ** 2))
 
 
+class RepeatOutlierFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("objective", FloatChannel)
+        self.run_counter = 0
+
+    def run_once(self):
+        self.objective.push(9.0 if self.run_counter % 3 == 0 else 0.0)
+        self.run_counter += 1
+
+
 QuadraticScanExp = make_fragment_scan_exp(QuadraticFragment)
 InvertedQuadraticScanExp = make_fragment_scan_exp(InvertedQuadraticFragment)
 OpaqueObjectiveScanExp = make_fragment_scan_exp(OpaqueObjectiveFragment)
 IntAxisScanExp = make_fragment_scan_exp(IntAxisFragment)
+RepeatOutlierScanExp = make_fragment_scan_exp(RepeatOutlierFragment)
 
 
 def _evaluate_optimizer(opt, objective):
@@ -172,6 +184,8 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         direction="min",
         algorithm="nelder_mead",
         max_evals=120,
+        num_repeats_per_point=1,
+        averaging_method="mean",
     ):
         exp.args._params["execution_mode"] = "optimise"
         exp.args._params["optimise"] = {
@@ -198,6 +212,8 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
                 "xatol": 1e-4,
                 "fatol": 1e-6,
             },
+            "num_repeats_per_point": num_repeats_per_point,
+            "averaging_method": averaging_method,
             "skip_on_persistent_transitory_error": False,
         }
 
@@ -214,6 +230,8 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         self.assertEqual(d("optimizer.kind"), "nelder_mead")
         self.assertEqual(d("optimizer.objective_channel"), "objective")
         self.assertEqual(d("optimizer.objective_direction"), "min")
+        self.assertEqual(d("optimizer.num_repeats_per_point"), 1)
+        self.assertEqual(d("optimizer.averaging_method"), "mean")
         self.assertIn(
             d("optimizer.termination_reason"), {"converged", "max_evals_reached"}
         )
@@ -376,3 +394,87 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         exp.args._params["optimise"]["algorithm"]["xatol"] = 1.5
         with self.assertRaises(ScanSpecError):
             exp.prepare()
+
+    def test_reject_non_positive_repeats_per_point(self):
+        exp = self.create(QuadraticScanExp)
+        self._configure_optimise(exp)
+        exp.args._params["optimise"]["num_repeats_per_point"] = 0
+        with self.assertRaises(ScanSpecError):
+            exp.prepare()
+
+    def test_reject_unknown_averaging_method(self):
+        exp = self.create(QuadraticScanExp)
+        self._configure_optimise(exp)
+        exp.args._params["optimise"]["averaging_method"] = "mode"
+        with self.assertRaises(ScanSpecError):
+            exp.prepare()
+
+    def test_mean_aggregates_repeated_objective_values(self):
+        exp = self.create(RepeatOutlierScanExp)
+        exp.args._params["execution_mode"] = "optimise"
+        exp.args._params["optimise"] = {
+            "parameters": [
+                {
+                    "fqn": "test_experiment_optimize.RepeatOutlierFragment.x",
+                    "path": "*",
+                    "min": -1.0,
+                    "max": 1.0,
+                    "initial": 0.0,
+                }
+            ],
+            "objective": {"channel": "objective", "direction": "min"},
+            "algorithm": {
+                "kind": "coordinate_search",
+                "max_evals": 1,
+                "xatol": 1e-4,
+                "fatol": 1e-6,
+            },
+            "num_repeats_per_point": 3,
+            "averaging_method": "mean",
+            "skip_on_persistent_transitory_error": False,
+        }
+        exp.prepare()
+        exp.run()
+
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.points.channel_objective"),
+            [9.0, 0.0, 0.0],
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 3.0
+        )
+
+    def test_median_aggregates_repeated_objective_values(self):
+        exp = self.create(RepeatOutlierScanExp)
+        exp.args._params["execution_mode"] = "optimise"
+        exp.args._params["optimise"] = {
+            "parameters": [
+                {
+                    "fqn": "test_experiment_optimize.RepeatOutlierFragment.x",
+                    "path": "*",
+                    "min": -1.0,
+                    "max": 1.0,
+                    "initial": 0.0,
+                }
+            ],
+            "objective": {"channel": "objective", "direction": "min"},
+            "algorithm": {
+                "kind": "coordinate_search",
+                "max_evals": 1,
+                "xatol": 1e-4,
+                "fatol": 1e-6,
+            },
+            "num_repeats_per_point": 3,
+            "averaging_method": "median",
+            "skip_on_persistent_transitory_error": False,
+        }
+        exp.prepare()
+        exp.run()
+
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.points.channel_objective"),
+            [9.0, 0.0, 0.0],
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 0.0
+        )

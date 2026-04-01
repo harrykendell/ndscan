@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import repeat
 from typing import Any
 
 import numpy as np
@@ -14,6 +15,7 @@ from .scan_runner import ScanAxis, select_runner_class
 __all__ = [
     "ObjectiveSpec",
     "OptimizeAlgorithmSpec",
+    "OptimizeAcquisitionSpec",
     "OptimizeAxis",
     "OptimizeSpec",
     "Optimizer",
@@ -37,6 +39,13 @@ class OptimizeAlgorithmSpec:
     xatol: float = 1e-3
     fatol: float = 1e-3
 
+
+@dataclass
+class OptimizeAcquisitionSpec:
+    num_repeats_per_point: int = 1
+    averaging_method: str = "mean"
+
+
 @dataclass
 class OptimizeAxis:
     param_schema: dict[str, Any]
@@ -52,6 +61,7 @@ class OptimizeSpec:
     axes: list[OptimizeAxis]
     objective: ObjectiveSpec
     algorithm: OptimizeAlgorithmSpec
+    acquisition: OptimizeAcquisitionSpec
 
 
 class Optimizer:
@@ -607,7 +617,9 @@ class OptimizeRunner(HasEnvironment):
         ]
         point_runner.setup(fragment, scan_axes, axis_sinks)
 
+        repeats_per_point = spec.acquisition.num_repeats_per_point
         current_point: tuple[float, ...] | None = None
+        current_objective_samples: list[float] = []
         point_loaded = False
         num_points_recorded = 0
         try:
@@ -620,22 +632,29 @@ class OptimizeRunner(HasEnvironment):
                             current_point = optimizer.ask()
                             if current_point is None:
                                 break
+                            current_objective_samples.clear()
                             point_loaded = False
                         if not point_loaded:
-                            point_runner.set_points(iter([current_point]))
+                            point_runner.set_points(repeat(current_point, repeats_per_point))
                             point_loaded = True
 
                         completed = point_runner.acquire(device_cleanup=False)
 
                         new_count = len(axis_sinks[0].get_all())
-                        if new_count == num_points_recorded:
-                            if completed:
-                                optimizer.tell(current_point, float("inf"))
-                                current_point = None
-                                point_loaded = False
-                        else:
+                        if new_count != num_points_recorded:
+                            current_objective_samples.extend(
+                                float(v)
+                                for v in objective_channel.sink.get_all()[
+                                    num_points_recorded:new_count
+                                ]
+                            )
                             num_points_recorded = new_count
-                            objective_value = objective_channel.sink.get_last()
+
+                        if len(current_objective_samples) >= repeats_per_point:
+                            objective_value = _aggregate_objective_samples(
+                                current_objective_samples[:repeats_per_point],
+                                spec.acquisition.averaging_method,
+                            )
                             transformed = (
                                 objective_value
                                 if spec.objective.direction == "min"
@@ -653,6 +672,12 @@ class OptimizeRunner(HasEnvironment):
                                     )
                                     on_best_updated(best_point, actual_value)
 
+                            current_objective_samples.clear()
+                            current_point = None
+                            point_loaded = False
+                        elif completed:
+                            optimizer.tell(current_point, float("inf"))
+                            current_objective_samples.clear()
                             current_point = None
                             point_loaded = False
 
@@ -672,6 +697,14 @@ class OptimizeRunner(HasEnvironment):
                 on_terminated(optimizer.termination_reason())
 
 
+def _aggregate_objective_samples(samples: list[float], method: str) -> float:
+    if method == "mean":
+        return float(np.mean(samples))
+    if method == "median":
+        return float(np.median(samples))
+    raise ValueError(f"Unsupported optimisation averaging method '{method}'")
+
+
 def describe_optimise(
     spec: OptimizeSpec,
     fragment,
@@ -689,6 +722,10 @@ def describe_optimise(
             }
             for axis in spec.axes
         ],
+        "acquisition": {
+            "num_repeats_per_point": spec.acquisition.num_repeats_per_point,
+            "averaging_method": spec.acquisition.averaging_method,
+        },
         "channels": {
             name: channel.describe()
             for channel, name in short_result_names.items()

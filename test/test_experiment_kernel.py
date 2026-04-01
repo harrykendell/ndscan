@@ -464,6 +464,21 @@ class KernelQuadraticFragment(ExpFragment):
 KernelQuadraticFragmentScan = make_fragment_scan_exp(KernelQuadraticFragment)
 
 
+class KernelRepeatOutlierFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", 0.0)
+        self.setattr_result("objective", FloatChannel)
+        self.run_counter = np.int32(0)
+
+    @kernel
+    def run_once(self):
+        self.objective.push(9.0 if self.run_counter % 3 == 0 else 0.0)
+        self.run_counter += 1
+
+
+KernelRepeatOutlierFragmentScan = make_fragment_scan_exp(KernelRepeatOutlierFragment)
+
+
 class KernelAddOneFragmentSubscan(SubscanExpFragment):
     def build_fragment(self):
         self.setattr_fragment("add_one", KernelAddOneFragment)
@@ -838,3 +853,44 @@ class KernelOptimizeCase(KernelEmulatorCase):
             self.dataset_db.get("ndscan.rid_0.optimizer.best_axis_1"), -0.5, places=2
         )
         self.assertLess(self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 1e-4)
+
+    def test_kernel_fragment_median_aggregates_repeats_for_optimiser(self):
+        exp = self.create(KernelRepeatOutlierFragmentScan)
+        exp.args._params["execution_mode"] = "optimise"
+        exp.args._params["optimise"] = {
+            "parameters": [
+                {
+                    "fqn": "test_experiment_kernel.KernelRepeatOutlierFragment.x",
+                    "path": "*",
+                    "min": -1.0,
+                    "max": 1.0,
+                    "initial": 0.0,
+                }
+            ],
+            "objective": {"channel": "objective", "direction": "min"},
+            "algorithm": {
+                "kind": "coordinate_search",
+                "max_evals": 1,
+                "xatol": 1e-4,
+                "fatol": 1e-6,
+            },
+            "num_repeats_per_point": 3,
+            "averaging_method": "median",
+            "skip_on_persistent_transitory_error": False,
+        }
+        exp.prepare()
+        exp.run()
+
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.points.channel_objective"),
+            [9.0, 0.0, 0.0],
+        )
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.num_repeats_per_point"), 3
+        )
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.averaging_method"), "median"
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 0.0
+        )

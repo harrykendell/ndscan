@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections import Counter, OrderedDict
@@ -28,6 +30,19 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+SCAN_SKIP_PERSISTENT_TRANSITORY_TOOLTIP = (
+    "If more than the configured limit of transitory errors occur for a "
+    "single scan point, skip it and attempt the next point instead of "
+    "terminating the entire scan. Does not affect regular exceptions."
+)
+
+OPTIMISE_SKIP_PERSISTENT_TRANSITORY_TOOLTIP = (
+    "If more than the configured limit of transitory errors occur for a "
+    "single optimisation point, continue by telling the optimiser that point "
+    "has np.inf cost instead of terminating the entire optimisation. "
+    "Does not affect regular exceptions."
+)
+
 
 def _make_algorithm_value_box(
     minimum: float, maximum: float, initial: float, *, step=None
@@ -45,6 +60,7 @@ def _make_algorithm_value_box(
         box.setSingleStep(step)
     box.setRelativeStep()
     box.setValue(initial)
+    box.setMinimumWidth(box.minimumSizeHint().width())
     return box
 
 
@@ -255,9 +271,7 @@ class ScanOptions:
             current_scan.get("skip_on_persistent_transitory_error", False)
         )
         self.skip_persistently_failing_box.setToolTip(
-            "If more than the configured limit of transitory errors occur for a "
-            + "single scan point, skip it and attempt the next point instead of "
-            + "terminating the entire scan. Does not affect regular exceptions."
+            SCAN_SKIP_PERSISTENT_TRANSITORY_TOOLTIP
         )
         skip_persistently_failing_layout.addWidget(self.skip_persistently_failing_box)
         skip_persistently_failing_layout.setStretchFactor(
@@ -320,18 +334,20 @@ class ScanOptions:
             else "Minimise"
         )
 
-        self.algorithm_container = QtWidgets.QWidget()
-        algorithm_layout = QtWidgets.QHBoxLayout()
-        algorithm_layout.setContentsMargins(5, 5, 5, 5)
-        self.algorithm_container.setLayout(algorithm_layout)
+        self.algorithm_settings_container = QtWidgets.QWidget()
+        algorithm_settings_layout = QtWidgets.QVBoxLayout()
+        algorithm_settings_layout.setContentsMargins(5, 5, 5, 5)
+        self.algorithm_settings_container.setLayout(algorithm_settings_layout)
+
+        algorithm_row_layout = QtWidgets.QHBoxLayout()
+        algorithm_settings_layout.addLayout(algorithm_row_layout)
         self.algorithm_kind_map = {}
         self.algorithm_box = QtWidgets.QComboBox()
         self._add_algorithm_choice("Nelder-Mead", "nelder_mead")
         self._add_algorithm_choice("Coordinate search", "coordinate_search")
         self.algorithm_box.setToolTip("Choose the optimisation algorithm.")
-        algorithm_layout.addWidget(self.algorithm_box)
-        algorithm_layout.setStretchFactor(self.algorithm_box, 1)
-        algorithm_layout.addStretch()
+        algorithm_row_layout.addWidget(self.algorithm_box)
+        algorithm_row_layout.setStretchFactor(self.algorithm_box, 1)
 
         current_algorithm = current_optimise.get("algorithm", {})
         current_algorithm_kind = current_algorithm.get("kind", "nelder_mead")
@@ -345,13 +361,8 @@ class ScanOptions:
                 self._add_algorithm_choice(missing_label, current_algorithm_kind)
                 self.algorithm_box.setCurrentText(missing_label)
 
-        self.algorithm_settings_container = QtWidgets.QWidget()
-        algorithm_settings_layout = QtWidgets.QHBoxLayout()
-        algorithm_settings_layout.setContentsMargins(5, 5, 5, 5)
-        self.algorithm_settings_container.setLayout(algorithm_settings_layout)
-
         max_evals_label = QtWidgets.QLabel("max_evals:")
-        algorithm_settings_layout.addWidget(max_evals_label)
+        algorithm_row_layout.addWidget(max_evals_label)
         self.max_evals_box = QtWidgets.QSpinBox()
         self.max_evals_box.setMinimum(1)
         self.max_evals_box.setMaximum(10**7)
@@ -359,20 +370,25 @@ class ScanOptions:
             "Maximum number of objective evaluations before stopping."
         )
         self.max_evals_box.setValue(current_algorithm.get("max_evals", 100))
-        algorithm_settings_layout.addWidget(self.max_evals_box)
+        self.max_evals_box.setMinimumWidth(self.max_evals_box.minimumSizeHint().width())
+        algorithm_row_layout.addWidget(self.max_evals_box)
+        algorithm_row_layout.addStretch()
+
+        tolerance_layout = QtWidgets.QHBoxLayout()
+        algorithm_settings_layout.addLayout(tolerance_layout)
 
         fatol_label = QtWidgets.QLabel("fatol:")
-        algorithm_settings_layout.addWidget(fatol_label)
+        tolerance_layout.addWidget(fatol_label)
         self.fatol_box = _make_algorithm_value_box(
             0.0, 10**9, current_algorithm.get("fatol", 1e-3)
         )
         self.fatol_box.setToolTip(
             "Terminate when the objective value changes by at most this amount."
         )
-        algorithm_settings_layout.addWidget(self.fatol_box)
+        tolerance_layout.addWidget(self.fatol_box)
 
         xatol_label = QtWidgets.QLabel("xatol:")
-        algorithm_settings_layout.addWidget(xatol_label)
+        tolerance_layout.addWidget(xatol_label)
         self.xatol_box = _make_algorithm_value_box(
             0.0, 1.0, current_algorithm.get("xatol", 1e-3), step=1e-4
         )
@@ -380,8 +396,43 @@ class ScanOptions:
             "Terminate when each axis moves by at most this fraction of its "
             "configured bounds span."
         )
-        algorithm_settings_layout.addWidget(self.xatol_box)
-        algorithm_settings_layout.addStretch()
+        tolerance_layout.addWidget(self.xatol_box)
+        tolerance_layout.addStretch()
+
+        self.optimise_acquisition_container = QtWidgets.QWidget()
+        optimise_acquisition_layout = QtWidgets.QHBoxLayout()
+        optimise_acquisition_layout.setContentsMargins(5, 5, 5, 5)
+        self.optimise_acquisition_container.setLayout(optimise_acquisition_layout)
+
+        repeats_label = QtWidgets.QLabel("Repeats:")
+        optimise_acquisition_layout.addWidget(repeats_label)
+        self.optimise_num_repeats_per_point_box = QtWidgets.QSpinBox()
+        self.optimise_num_repeats_per_point_box.setMinimum(1)
+        self.optimise_num_repeats_per_point_box.setMaximum(10**6)
+        self.optimise_num_repeats_per_point_box.setToolTip(
+            "How many times to acquire each optimiser point before aggregating it."
+        )
+        self.optimise_num_repeats_per_point_box.setValue(
+            current_optimise.get("num_repeats_per_point", 1)
+        )
+        optimise_acquisition_layout.addWidget(
+            self.optimise_num_repeats_per_point_box
+        )
+
+        averaging_label = QtWidgets.QLabel("Averaging:")
+        optimise_acquisition_layout.addWidget(averaging_label)
+        self.optimise_averaging_method_box = QtWidgets.QComboBox()
+        self.optimise_averaging_method_box.addItems(["Mean", "Median"])
+        self.optimise_averaging_method_box.setToolTip(
+            "How repeated objective measurements are combined before updating the optimiser."
+        )
+        self.optimise_averaging_method_box.setCurrentText(
+            "Median"
+            if current_optimise.get("averaging_method", "mean") == "median"
+            else "Mean"
+        )
+        optimise_acquisition_layout.addWidget(self.optimise_averaging_method_box)
+        optimise_acquisition_layout.addStretch()
 
         self.optimise_skip_persistently_failing_container = QtWidgets.QWidget()
         optimise_skip_layout = QtWidgets.QHBoxLayout()
@@ -394,7 +445,7 @@ class ScanOptions:
             current_optimise.get("skip_on_persistent_transitory_error", False)
         )
         self.optimise_skip_persistently_failing_box.setToolTip(
-            self.skip_persistently_failing_box.toolTip()
+            OPTIMISE_SKIP_PERSISTENT_TRANSITORY_TOOLTIP
         )
         optimise_skip_layout.addWidget(self.optimise_skip_persistently_failing_box)
         optimise_skip_layout.setStretchFactor(
@@ -415,6 +466,8 @@ class ScanOptions:
             self.max_evals_box,
             self.xatol_box,
             self.fatol_box,
+            self.optimise_num_repeats_per_point_box,
+            self.optimise_averaging_method_box,
             self.optimise_skip_persistently_failing_box,
         ]:
             try:
@@ -454,6 +507,8 @@ class ScanOptions:
             self.max_evals_box,
             self.xatol_box,
             self.fatol_box,
+            self.optimise_num_repeats_per_point_box,
+            self.optimise_averaging_method_box,
             self.optimise_skip_persistently_failing_box,
         ]:
             try:
@@ -484,10 +539,10 @@ class ScanOptions:
                 self.skip_persistently_failing_container,
             ),
             ("Objective channel", self.objective_container),
-            ("Algorithm", self.algorithm_container),
             ("Algorithm settings", self.algorithm_settings_container),
+            ("Point acquisition", self.optimise_acquisition_container),
             (
-                "Skip point if transitory errors persist",
+                "Apply maximally bad objective result if transitory errors persist",
                 self.optimise_skip_persistently_failing_container,
             ),
         ]
@@ -536,6 +591,14 @@ class ScanOptions:
             "xatol": self.xatol_box.value(),
             "fatol": self.fatol_box.value(),
         }
+        optimise["num_repeats_per_point"] = (
+            self.optimise_num_repeats_per_point_box.value()
+        )
+        optimise["averaging_method"] = (
+            "median"
+            if self.optimise_averaging_method_box.currentText() == "Median"
+            else "mean"
+        )
         optimise["skip_on_persistent_transitory_error"] = (
             self.optimise_skip_persistently_failing_box.isChecked()
         )
@@ -553,8 +616,8 @@ class ScanOptions:
 
         for widget in [
             self.objective_container,
-            self.algorithm_container,
             self.algorithm_settings_container,
+            self.optimise_acquisition_container,
             self.optimise_skip_persistently_failing_container,
         ]:
             self._set_row_visible(widget, not is_scan)

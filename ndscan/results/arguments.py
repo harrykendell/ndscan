@@ -124,7 +124,15 @@ def dump_optimise(schema: dict[str, Any]) -> Iterable[str]:
     yield f" - xatol (fraction of span): {algorithm.get('xatol', 1e-3)}"
     yield f" - fatol: {algorithm.get('fatol', 1e-3)}"
     yield (
-        " - Skip point if transitory errors persist: "
+        " - Repeats per optimiser point: "
+        + str(optimise.get("num_repeats_per_point", 1))
+    )
+    yield (
+        " - Averaging method: "
+        + str(optimise.get("averaging_method", "mean"))
+    )
+    yield (
+        " - Give point np.inf cost if transitory errors persist: "
         + str(optimise.get("skip_on_persistent_transitory_error", False))
     )
 

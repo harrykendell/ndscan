@@ -4,10 +4,12 @@ import types
 import unittest
 from enum import Enum
 from itertools import tee
+from unittest import mock
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if os.getenv("NDSCAN_SKIP_GUI"):
+    raise unittest.SkipTest("NDSCAN_SKIP_GUI")
 
-from ndscan._qt import QtWidgets
+from ndscan._qt import QtCore, QtWidgets
 
 import itertools
 
@@ -21,9 +23,8 @@ if not hasattr(itertools, "pairwise"):
 
 pyon = types.ModuleType("sipyco.pyon")
 pyon.decode = lambda value: eval(value, {})
-sys.modules.setdefault("sipyco", types.ModuleType("sipyco"))
-sys.modules["sipyco.pyon"] = pyon
-sys.modules["sipyco"].pyon = pyon
+sipyco = types.ModuleType("sipyco")
+sipyco.pyon = pyon
 
 scientific_spinbox = types.ModuleType("artiq.gui.scientific_spinbox")
 
@@ -109,7 +110,9 @@ ndscan_utils.eval_param_default = lambda value, get_dataset: eval(
 ndscan_utils.ExecutionMode = ExecutionMode
 ndscan_utils.NoAxesMode = NoAxesMode
 ndscan_utils.PARAMS_ARG_KEY = "ndscan_params"
-ndscan_utils.shorten_to_unambiguous_suffixes = lambda fqns: fqns
+ndscan_utils.shorten_to_unambiguous_suffixes = (
+    lambda fqns, _formatter=None: {fqn: fqn for fqn in fqns}
+)
 entries = types.ModuleType("artiq.gui.entries")
 entries.procdesc_to_entry = lambda procdesc: procdesc
 fuzzy_select = types.ModuleType("artiq.gui.fuzzy_select")
@@ -118,27 +121,34 @@ param_tree_dialog = types.ModuleType("ndscan.dashboard.param_tree_dialog")
 param_tree_dialog.OverrideProvider = object
 param_tree_dialog.OverrideStatus = object
 param_tree_dialog.ParamTreeDialog = QtWidgets.QDialog
-sys.modules["artiq"] = artiq
-sys.modules["artiq.gui"] = gui
-sys.modules["artiq.gui.entries"] = entries
-sys.modules["artiq.gui.fuzzy_select"] = fuzzy_select
-sys.modules["artiq.gui.scientific_spinbox"] = scientific_spinbox
-sys.modules["artiq.gui.tools"] = gui_tools
-sys.modules["artiq.language"] = language
-sys.modules["artiq.language.units"] = units
-sys.modules["oitg"] = oitg
-sys.modules["oitg.fitting"] = fitting
-sys.modules["ndscan.utils"] = ndscan_utils
-sys.modules["ndscan.dashboard.param_tree_dialog"] = param_tree_dialog
 
-from ndscan.dashboard.scan_options import (
-    CentreSpanScanOption,
-    ExpandingScanOption,
-    FixedScanOption,
-    MinMaxScanOption,
-    OptimizeAxisOption,
-    SyncValue,
-)
+_stubbed_modules = {
+    "artiq": artiq,
+    "artiq.gui": gui,
+    "artiq.gui.entries": entries,
+    "artiq.gui.fuzzy_select": fuzzy_select,
+    "artiq.gui.scientific_spinbox": scientific_spinbox,
+    "artiq.gui.tools": gui_tools,
+    "artiq.language": language,
+    "artiq.language.units": units,
+    "oitg": oitg,
+    "oitg.fitting": fitting,
+    "sipyco": sipyco,
+    "sipyco.pyon": pyon,
+    "ndscan.utils": ndscan_utils,
+    "ndscan.dashboard.param_tree_dialog": param_tree_dialog,
+}
+
+with mock.patch.dict(sys.modules, _stubbed_modules):
+    from ndscan.dashboard.argument_editor import ScanOptions as EditorScanOptions
+    from ndscan.dashboard.scan_options import (
+        CentreSpanScanOption,
+        ExpandingScanOption,
+        FixedScanOption,
+        MinMaxScanOption,
+        OptimizeAxisOption,
+        SyncValue,
+    )
 
 
 class DashboardOptionCase(unittest.TestCase):
@@ -221,6 +231,101 @@ class OptimizeAxisOptionCase(DashboardOptionCase):
         self.assertEqual(option.box_min.value(), -2.0)
         self.assertEqual(option.box_initial.value(), 1.5)
         self.assertEqual(option.box_max.value(), 3.0)
+
+
+class ScanOptionsCase(DashboardOptionCase):
+    def test_algorithm_settings_use_single_container(self):
+        options = EditorScanOptions({"optimise": {"algorithm": {}}})
+
+        labels = [label for label, _widget in options.get_rows()]
+        self.assertEqual(labels.count("Algorithm settings"), 1)
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(options.algorithm_settings_container)
+        container.setLayout(layout)
+        container.setFixedWidth(700)
+        container.show()
+        self.addCleanup(container.deleteLater)
+
+        self._app.processEvents()
+
+        self.assertEqual(
+            options.algorithm_box.mapTo(container, QtCore.QPoint(0, 0)).y(),
+            options.max_evals_box.mapTo(container, QtCore.QPoint(0, 0)).y(),
+        )
+        self.assertIs(
+            options.max_evals_box.parentWidget(), options.algorithm_settings_container
+        )
+        self.assertIs(
+            options.algorithm_box.parentWidget(), options.algorithm_settings_container
+        )
+        self.assertIs(
+            options.xatol_box.parentWidget(), options.algorithm_settings_container
+        )
+
+    def test_optimise_skip_wording_mentions_np_inf_cost(self):
+        options = EditorScanOptions({"optimise": {"algorithm": {}}, "scan": {}})
+
+        labels = [label for label, _widget in options.get_rows()]
+        self.assertIn("Skip point if transitory errors persist", labels)
+        self.assertIn(
+            "Apply maximally bad objective result if transitory errors persist",
+            labels,
+        )
+        self.assertIn(
+            "skip it and attempt the next point",
+            options.skip_persistently_failing_box.toolTip(),
+        )
+        self.assertIn(
+            "np.inf",
+            options.optimise_skip_persistently_failing_box.toolTip(),
+        )
+
+    def test_algorithm_settings_keep_fatol_and_xatol_on_one_row(self):
+        options = EditorScanOptions({"optimise": {"algorithm": {}}})
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(options.algorithm_settings_container)
+        container.setLayout(layout)
+        container.setFixedWidth(480)
+        container.show()
+        self.addCleanup(container.deleteLater)
+
+        self._app.processEvents()
+
+        self.assertEqual(options.fatol_box.y(), options.xatol_box.y())
+        self.assertGreaterEqual(
+            options.fatol_box.width(), options.fatol_box.minimumSizeHint().width()
+        )
+        self.assertGreaterEqual(
+            options.xatol_box.width(), options.xatol_box.minimumSizeHint().width()
+        )
+
+    def test_optimise_acquisition_defaults_and_serialisation(self):
+        options = EditorScanOptions(
+            {
+                "execution_mode": "optimise",
+                "optimise": {
+                    "algorithm": {},
+                    "num_repeats_per_point": 5,
+                    "averaging_method": "median",
+                },
+            }
+        )
+
+        self.assertEqual(options.optimise_num_repeats_per_point_box.value(), 5)
+        self.assertEqual(options.optimise_averaging_method_box.currentText(), "Median")
+
+        params = {}
+        options.write_to_params(params)
+
+        self.assertEqual(params["execution_mode"], "optimise")
+        self.assertEqual(params["optimise"]["num_repeats_per_point"], 5)
+        self.assertEqual(params["optimise"]["averaging_method"], "median")
 
 
 class ScanAxisOptionCase(DashboardOptionCase):

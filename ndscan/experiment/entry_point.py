@@ -48,6 +48,7 @@ from .fragment import (
     TransitoryError,
 )
 from .optimize import (
+    OptimizeAcquisitionSpec,
     OptimizeAlgorithmSpec,
     ObjectiveSpec,
     OptimizeAxis,
@@ -291,6 +292,8 @@ class ArgumentInterface(HasEnvironment):
                     "xatol": 1e-3,
                     "fatol": 1e-3,
                 },
+                "num_repeats_per_point": 1,
+                "averaging_method": "mean",
                 "skip_on_persistent_transitory_error": False,
             }
         self._params = _merge_ndscan_params(
@@ -401,9 +404,19 @@ class ArgumentInterface(HasEnvironment):
 
         objective = optimise.get("objective", {})
         algorithm = optimise.get("algorithm", {})
+        num_repeats_per_point = int(optimise.get("num_repeats_per_point", 1))
+        averaging_method = optimise.get("averaging_method", "mean")
         max_evals = int(algorithm.get("max_evals", 100))
         xatol = float(algorithm.get("xatol", 1e-3))
         fatol = float(algorithm.get("fatol", 1e-3))
+        if num_repeats_per_point < 1:
+            raise ScanSpecError(
+                "Optimisation num_repeats_per_point must be positive"
+            )
+        if averaging_method not in {"mean", "median"}:
+            raise ScanSpecError(
+                "Optimisation averaging_method must be 'mean' or 'median'"
+            )
         if max_evals < 1:
             raise ScanSpecError("Optimisation max_evals must be positive")
         if xatol < 0.0 or xatol > 1.0:
@@ -424,6 +437,7 @@ class ArgumentInterface(HasEnvironment):
                 xatol,
                 fatol,
             ),
+            OptimizeAcquisitionSpec(num_repeats_per_point, averaging_method),
         )
         return spec, optimise.get("skip_on_persistent_transitory_error", False)
 
@@ -826,6 +840,14 @@ class TopLevelRunner(HasEnvironment):
             push("optimizer.max_evals", self.spec.algorithm.max_evals)
             push("optimizer.xatol", self.spec.algorithm.xatol)
             push("optimizer.fatol", self.spec.algorithm.fatol)
+            push(
+                "optimizer.num_repeats_per_point",
+                self.spec.acquisition.num_repeats_per_point,
+            )
+            push(
+                "optimizer.averaging_method",
+                self.spec.acquisition.averaging_method,
+            )
         else:
             self._scan_desc = describe_scan(
                 self.spec, self.fragment, self._short_child_channel_names
