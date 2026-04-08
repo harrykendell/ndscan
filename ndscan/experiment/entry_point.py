@@ -36,6 +36,7 @@ from ..utils import (
     SCHEMA_REVISION,
     SCHEMA_REVISION_KEY,
     NoAxesMode,
+    merge_ndscan_params,
     merge_no_duplicates,
     shorten_to_unambiguous_suffixes,
     strip_suffix,
@@ -93,40 +94,6 @@ if "sphinx" in sys.modules:
     __all__.append("FragmentScanExperiment")
 
 logger = logging.getLogger(__name__)
-
-
-def _merge_ndscan_params(default_params: dict[str, Any], state_params: dict[str, Any]):
-    params = default_params.copy()
-
-    for key in [
-        "execution_mode",
-        "scan",
-        "optimise",
-        "overrides",
-    ]:
-        if key in state_params:
-            params[key] = state_params[key]
-
-    if "scan" in default_params:
-        scan = default_params["scan"].copy()
-        scan.update(state_params.get("scan", {}))
-        params["scan"] = scan
-
-    if "optimise" in default_params:
-        optimise = default_params["optimise"].copy()
-        optimise.update(state_params.get("optimise", {}))
-
-        objective = default_params["optimise"].get("objective", {}).copy()
-        objective.update(state_params.get("optimise", {}).get("objective", {}))
-        optimise["objective"] = objective
-
-        algorithm = default_params["optimise"].get("algorithm", {}).copy()
-        algorithm.update(state_params.get("optimise", {}).get("algorithm", {}))
-        optimise["algorithm"] = algorithm
-
-        params["optimise"] = optimise
-
-    return params
 
 
 class ScanSpecError(Exception):
@@ -296,7 +263,7 @@ class ArgumentInterface(HasEnvironment):
                 "averaging_method": "mean",
                 "skip_on_persistent_transitory_error": False,
             }
-        self._params = _merge_ndscan_params(
+        self._params = merge_ndscan_params(
             desc, self.get_argument(PARAMS_ARG_KEY, PYONValue(default=desc))
         )
 

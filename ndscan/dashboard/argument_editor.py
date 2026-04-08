@@ -17,6 +17,7 @@ from ..utils import (
     ExecutionMode,
     PARAMS_ARG_KEY,
     NoAxesMode,
+    merge_ndscan_params,
     shorten_to_unambiguous_suffixes,
 )
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
@@ -83,11 +84,7 @@ def _try_extract_ndscan_params(
 
     state = arg.get("state", None)
     default_params = pyon.decode(arg["desc"]["default"])
-    params = (
-        _merge_ndscan_params(default_params, pyon.decode(state))
-        if state
-        else default_params
-    )
+    params = merge_ndscan_params(default_params, pyon.decode(state) if state else None)
     vanilla_args = arguments.copy()
     del vanilla_args[PARAMS_ARG_KEY]
     return params, vanilla_args
@@ -95,40 +92,6 @@ def _try_extract_ndscan_params(
 
 def _update_ndscan_params(arguments, params):
     arguments[PARAMS_ARG_KEY]["state"] = pyon.encode(params)
-
-
-def _merge_ndscan_params(default_params: dict[str, Any], state_params: dict[str, Any]):
-    params = default_params.copy()
-
-    for key in [
-        "execution_mode",
-        "scan",
-        "optimise",
-        "overrides",
-    ]:
-        if key in state_params:
-            params[key] = state_params[key]
-
-    if "scan" in default_params:
-        scan = default_params["scan"].copy()
-        scan.update(state_params.get("scan", {}))
-        params["scan"] = scan
-
-    if "optimise" in default_params:
-        optimise = default_params["optimise"].copy()
-        optimise.update(state_params.get("optimise", {}))
-
-        objective = default_params["optimise"].get("objective", {}).copy()
-        objective.update(state_params.get("optimise", {}).get("objective", {}))
-        optimise["objective"] = objective
-
-        algorithm = default_params["optimise"].get("algorithm", {}).copy()
-        algorithm.update(state_params.get("optimise", {}).get("algorithm", {}))
-        optimise["algorithm"] = algorithm
-
-        params["optimise"] = optimise
-
-    return params
 
 
 # For simplicity, we realise infinite repeats as int32.max (rather than adding

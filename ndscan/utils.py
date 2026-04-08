@@ -73,6 +73,44 @@ def strip_suffix(string: str, suffix: str) -> str:
     return string
 
 
+def merge_ndscan_params(
+    default_params: dict[str, Any], state_params: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Merge persisted ndscan argument state into default parameter values.
+
+    ``state_params`` can legitimately be ``None`` (for example during ARTIQ
+    experiment examination).
+    """
+    state = state_params if isinstance(state_params, dict) else {}
+
+    params = default_params.copy()
+    for key in ["execution_mode", "scan", "optimise", "overrides"]:
+        if key in state:
+            params[key] = state[key]
+
+    if "scan" in default_params:
+        scan = default_params["scan"].copy()
+        scan.update(state.get("scan") or {})
+        params["scan"] = scan
+
+    if "optimise" in default_params:
+        optimise = default_params["optimise"].copy()
+        optimise_state = state.get("optimise") or {}
+        optimise.update(optimise_state)
+
+        objective = default_params["optimise"].get("objective", {}).copy()
+        objective.update(optimise_state.get("objective") or {})
+        optimise["objective"] = objective
+
+        algorithm = default_params["optimise"].get("algorithm", {}).copy()
+        algorithm.update(optimise_state.get("algorithm") or {})
+        optimise["algorithm"] = algorithm
+
+        params["optimise"] = optimise
+
+    return params
+
+
 T = TypeVar("T")
 
 
