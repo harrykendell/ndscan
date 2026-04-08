@@ -1,7 +1,12 @@
 import unittest
 from itertools import permutations
 
-from ndscan.utils import shorten_to_unambiguous_suffixes, strip_prefix, strip_suffix
+from ndscan.utils import (
+    merge_ndscan_params,
+    shorten_to_unambiguous_suffixes,
+    strip_prefix,
+    strip_suffix,
+)
 
 
 class StripTest(unittest.TestCase):
@@ -41,3 +46,64 @@ class ShortenTest(unittest.TestCase):
         # Test repeated fqns.
         with self.assertRaises(ValueError):
             shorten_at_slash(["foo/bar", "foo/bar"])
+
+
+class MergeNdscanParamsTest(unittest.TestCase):
+    def test_none_state_uses_defaults(self):
+        default = {
+            "execution_mode": "scan",
+            "scan": {"num_repeats": 1},
+            "optimise": {
+                "objective": {"channel": "", "direction": "min"},
+                "algorithm": {"kind": "nelder_mead", "max_evals": 100},
+            },
+            "overrides": {},
+        }
+
+        merged = merge_ndscan_params(default, None)
+        self.assertEqual(merged, default)
+        self.assertIsNot(merged, default)
+
+    def test_state_overrides_and_nested_merge(self):
+        default = {
+            "execution_mode": "scan",
+            "scan": {"num_repeats": 1, "no_axes_mode": "single"},
+            "optimise": {
+                "parameters": [],
+                "objective": {"channel": "", "direction": "min"},
+                "algorithm": {
+                    "kind": "nelder_mead",
+                    "max_evals": 100,
+                    "xatol": 1e-3,
+                    "fatol": 1e-3,
+                },
+            },
+            "overrides": {},
+        }
+        state = {
+            "execution_mode": "optimise",
+            "scan": {"num_repeats": 3},
+            "optimise": {
+                "objective": {"channel": "channel_result"},
+                "algorithm": {"max_evals": 500},
+            },
+        }
+
+        merged = merge_ndscan_params(default, state)
+        self.assertEqual(merged["execution_mode"], "optimise")
+        self.assertEqual(
+            merged["scan"], {"num_repeats": 3, "no_axes_mode": "single"}
+        )
+        self.assertEqual(
+            merged["optimise"]["objective"],
+            {"channel": "channel_result", "direction": "min"},
+        )
+        self.assertEqual(
+            merged["optimise"]["algorithm"],
+            {
+                "kind": "nelder_mead",
+                "max_evals": 500,
+                "xatol": 1e-3,
+                "fatol": 1e-3,
+            },
+        )

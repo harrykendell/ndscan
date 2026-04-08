@@ -110,6 +110,11 @@ ndscan_utils.eval_param_default = lambda value, get_dataset: eval(
 ndscan_utils.ExecutionMode = ExecutionMode
 ndscan_utils.NoAxesMode = NoAxesMode
 ndscan_utils.PARAMS_ARG_KEY = "ndscan_params"
+ndscan_utils.merge_ndscan_params = lambda default_params, state_params: (
+    default_params
+    if state_params is None
+    else {**default_params, **state_params}
+)
 ndscan_utils.shorten_to_unambiguous_suffixes = (
     lambda fqns, _formatter=None: {fqn: fqn for fqn in fqns}
 )
