@@ -17,7 +17,7 @@ def make_plot_for_dimensional_model(model: ScanModel) -> VerticalPanesWidget:
     dim = len(model.axes)
     if dim == 1:
         return XY1DPlotWidget(model)
-    if dim == 2:
+    if dim >= 2:
         return Image2DPlotWidget(model)
     raise NotImplementedError(
         f"Plots for {dim}-dimensional data are not yet implemented"

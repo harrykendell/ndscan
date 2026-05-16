@@ -94,6 +94,17 @@ def _axis_bounds(schema) -> tuple[float, float] | None:
     return lower, upper
 
 
+def _axis_span(schema, values) -> float:
+    bounds = _axis_bounds(schema)
+    if bounds is not None and bounds[1] != bounds[0]:
+        return abs(bounds[1] - bounds[0])
+    if len(values) > 1:
+        span = np.nanmax(values) - np.nanmin(values)
+        if span:
+            return abs(span)
+    return 1.0
+
+
 class CrosshairZDataLabel(CrosshairLabel):
     """Crosshair label for the z value of a 2D image"""
 
@@ -263,8 +274,7 @@ class _DelaunayInterpolationLayer:
                 "pen": self._marker_pen(updated),
                 "brush": pyqtgraph.mkBrush(
                     CONTRASTING_COLOR_TO_HIGHLIGHT
-                    if updated
-                    else (255, 255, 255, 185)
+                    if updated else (255, 255, 255, 185)
                 ),
             }
             if updated:
@@ -353,6 +363,27 @@ class _ImagePlot:
         if invalidate_previous:
             self._invalidate_current()
         self.update(self.averaging_enabled)
+
+    def set_axis_ranges(
+        self,
+        x_min: float | None,
+        x_max: float | None,
+        x_increment: float | None,
+        y_min: float | None,
+        y_max: float | None,
+        y_increment: float | None,
+    ):
+        self.x_min = x_min
+        self.x_max = x_max
+        self.x_increment = x_increment
+        self.y_min = y_min
+        self.y_max = y_max
+        self.y_increment = y_increment
+        self.x_range = None
+        self.y_range = None
+        self.sample_data = None
+        self.image_data = None
+        self._invalidate_current()
 
     def _invalidate_current(self):
         self.num_shown = 0
@@ -502,16 +533,35 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
 
         self.data_names = []
 
-        self.x_schema, self.y_schema = self.model.axes
+        self.x_axis_idx = 0
+        self.y_axis_idx = 1
+        self._use_pca_projection = len(self.model.axes) > 2
+        self.x_schema = self.model.axes[self.x_axis_idx]
+        self.y_schema = self.model.axes[self.y_axis_idx]
 
         self.plot_item = self.add_pane()
         self.plot_item.showGrid(x=True, y=True)
+        self.convergence_plot_item = None
+        self.convergence_curves = []
+        if self._use_pca_projection:
+            self.convergence_plot_item = self.add_pane()
+            self.convergence_plot_item.showGrid(x=True, y=True)
+            self.convergence_plot_item.setLabel("bottom", "Evaluation")
+            self.convergence_plot_item.setLabel(
+                "left", "Best-so-far parameter value", units="axis range"
+            )
+            self.convergence_plot_item.setYRange(0, 1, padding=0)
+            self.convergence_plot_item.addLegend(offset=(5, 5))
+            self.layout.setRowPreferredHeight(0, 10000)
+            self.layout.setRowPreferredHeight(1, 20000)
         self.plot: _ImagePlot | None = None
         self.crosshair = None
         self._highlighted_xy = (None, None)
 
         self.found_duplicate_coords = False
         self.unique_coords = set[tuple[float, float]]()
+        self._pca_components = None
+        self._pca_range_spec = None
 
         if (channels := self.model.get_channel_schemata()) is not None:
             call_later(lambda: self._initialise_series(channels))
@@ -532,6 +582,85 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         if not self.data_names:
             self.error.emit("No scalar result channels to display")
 
+        self._setup_display_axes()
+
+        def range_spec(schema):
+            return _axis_min(schema), _axis_max(schema), _axis_increment(schema)
+
+        image_item = ClickableImageItem()
+        image_item.sigClicked.connect(self._point_clicked)
+
+        self.plot_item.addItem(image_item)
+        colorbar = self.plot_item.addColorBar(image_item, width=15.0, interactive=False)
+        x_range_spec = (
+            (None, None, None)
+            if self._use_pca_projection
+            else range_spec(self.x_schema)
+        )
+        if self._use_pca_projection:
+            y_range_spec = (None, None, None)
+        else:
+            y_range_spec = range_spec(self.y_schema)
+
+        self.plot = _ImagePlot(
+            image_item,
+            colorbar,
+            self.data_names[0],
+            *x_range_spec,
+            *y_range_spec,
+            channels,
+        )
+        self.plot.interpolated_surface = _DelaunayInterpolationLayer(self.plot_item)
+
+        x_bounds = None if self._use_pca_projection else _axis_bounds(self.x_schema)
+        y_bounds = None if self._use_pca_projection else _axis_bounds(self.y_schema)
+        if x_bounds is not None and y_bounds is not None:
+            self.plot_item.setRange(xRange=x_bounds, yRange=y_bounds, padding=0)
+
+        highlight_pen = pyqtgraph.mkPen(**HIGHLIGHT_PEN)
+        brush = pyqtgraph.mkBrush(CONTRASTING_COLOR_TO_HIGHLIGHT)
+        self.highlight_point_item = pyqtgraph.ScatterPlotItem(
+            pen=highlight_pen, brush=brush, size=8, symbol="o"
+        )
+        self.highlight_point_item.setZValue(2)  # Show above all other points.
+        self.plot_item.addItem(self.highlight_point_item, ignoreBounds=True)
+
+        if self._use_pca_projection:
+            x_scaling_info = ("", 1)
+            y_scaling_info = ("", 1)
+        else:
+            x_scaling_info = get_axis_scaling_info(self.x_schema["param"]["spec"])
+            y_scaling_info = get_axis_scaling_info(self.y_schema["param"]["spec"])
+
+        x_label = CrosshairAxisLabel(
+            self.plot_item.getViewBox(), *x_scaling_info, is_x=True
+        )
+        y_label = CrosshairAxisLabel(
+            self.plot_item.getViewBox(), *y_scaling_info, is_x=False
+        )
+
+        self.crosshair = LabeledCrosshairCursor(
+            self, self.plot_item, [x_label, y_label, self.plot.z_crosshair_label]
+        )
+
+        add_source_id_label(self.plot_item.getViewBox(), self.model.context)
+
+        self.subscan_roots = create_subscan_roots(self.selected_point_model)
+        self.slice_roots = (
+            {} if self._use_pca_projection
+            else create_slice_roots(self.model, self.selected_point_model)
+        )
+
+        self.ready.emit()
+
+    def _setup_display_axes(self):
+        if self._use_pca_projection:
+            self.plot_item.getAxis("bottom").setScale(1)
+            self.plot_item.getAxis("bottom").setLabel("<b>Principal Component 1</b>")
+            self.plot_item.getAxis("left").setScale(1)
+            self.plot_item.getAxis("left").setLabel("<b>Principal Component 2</b>")
+            return
+
         def setup_axis(schema, location):
             param = schema["param"]
             setup_axis_item(
@@ -550,85 +679,210 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         setup_axis(self.x_schema, "bottom")
         setup_axis(self.y_schema, "left")
 
-        def range_spec(schema):
-            return _axis_min(schema), _axis_max(schema), _axis_increment(schema)
-
-        image_item = ClickableImageItem()
-        image_item.sigClicked.connect(self._point_clicked)
-
-        self.plot_item.addItem(image_item)
-        colorbar = self.plot_item.addColorBar(image_item, width=15.0, interactive=False)
-        self.plot = _ImagePlot(
-            image_item,
-            colorbar,
-            self.data_names[0],
-            *range_spec(self.x_schema),
-            *range_spec(self.y_schema),
-            channels,
-        )
-        self.plot.interpolated_surface = _DelaunayInterpolationLayer(self.plot_item)
-
-        x_bounds = _axis_bounds(self.x_schema)
-        y_bounds = _axis_bounds(self.y_schema)
-        if x_bounds is not None and y_bounds is not None:
-            self.plot_item.setRange(xRange=x_bounds, yRange=y_bounds, padding=0)
-
-        highlight_pen = pyqtgraph.mkPen(**HIGHLIGHT_PEN)
-        brush = pyqtgraph.mkBrush(CONTRASTING_COLOR_TO_HIGHLIGHT)
-        self.highlight_point_item = pyqtgraph.ScatterPlotItem(
-            pen=highlight_pen, brush=brush, size=8, symbol="o"
-        )
-        self.highlight_point_item.setZValue(2)  # Show above all other points.
-        self.plot_item.addItem(self.highlight_point_item, ignoreBounds=True)
-
-        x_scaling_info = get_axis_scaling_info(self.x_schema["param"]["spec"])
-        y_scaling_info = get_axis_scaling_info(self.y_schema["param"]["spec"])
-
-        x_label = CrosshairAxisLabel(
-            self.plot_item.getViewBox(), *x_scaling_info, is_x=True
-        )
-        y_label = CrosshairAxisLabel(
-            self.plot_item.getViewBox(), *y_scaling_info, is_x=False
-        )
-
-        self.crosshair = LabeledCrosshairCursor(
-            self, self.plot_item, [x_label, y_label, self.plot.z_crosshair_label]
-        )
-
-        add_source_id_label(self.plot_item.getViewBox(), self.model.context)
-
-        self.subscan_roots = create_subscan_roots(self.selected_point_model)
-        self.slice_roots = create_slice_roots(self.model, self.selected_point_model)
-
-        self.ready.emit()
-
     def _update_points(self, points, invalidate):
         if self.plot:
             if invalidate:
                 self.found_duplicate_coords = False
                 self.unique_coords.clear()
+            plot_points = self._project_points(points)
+            if self._use_pca_projection:
+                self.found_duplicate_coords = False
+                self.unique_coords.clear()
+                self._set_pca_ranges(plot_points)
+                self._update_parameter_convergence(points)
+                invalidate = True
             # If all points were unique so far, check if we have duplicates now.
             if not self.found_duplicate_coords:
                 num_skip = len(self.unique_coords)
-                for x in zip(points["axis_0"][num_skip:], points["axis_1"][num_skip:]):
+                for x in zip(
+                    plot_points["axis_0"][num_skip:], plot_points["axis_1"][num_skip:]
+                ):
                     if x in self.unique_coords:
                         self.found_duplicate_coords = True
                         break
                     else:
                         self.unique_coords.add(x)
 
-            if self.x_schema["param"]["type"] == "enum":
-                points["axis_0"] = enum_to_numeric(
-                    self.x_schema["param"]["spec"]["members"].keys(), points["axis_0"]
-                )
-            if self.y_schema["param"]["type"] == "enum":
-                points["axis_1"] = enum_to_numeric(
-                    self.y_schema["param"]["spec"]["members"].keys(), points["axis_1"]
-                )
-            self.plot.data_changed(points, invalidate_previous=invalidate)
+            self.plot.data_changed(plot_points, invalidate_previous=invalidate)
+
+    def _project_points(self, points):
+        plot_points = {
+            name: values
+            for name, values in points.items()
+            if not name.startswith("axis_")
+        }
+        if self._use_pca_projection:
+            x, y = self._pca_project_points(points)
+            plot_points["axis_0"] = x
+            plot_points["axis_1"] = y
+        else:
+            plot_points["axis_0"] = list(points[f"axis_{self.x_axis_idx}"])
+            plot_points["axis_1"] = list(points[f"axis_{self.y_axis_idx}"])
+        if self._use_pca_projection:
+            return plot_points
+
+        if self.x_schema["param"]["type"] == "enum":
+            plot_points["axis_0"] = enum_to_numeric(
+                self.x_schema["param"]["spec"]["members"].keys(), plot_points["axis_0"]
+            )
+        if self.y_schema["param"]["type"] == "enum":
+            plot_points["axis_1"] = enum_to_numeric(
+                self.y_schema["param"]["spec"]["members"].keys(), plot_points["axis_1"]
+            )
+        return plot_points
+
+    def _pca_project_points(self, points):
+        axis_values = []
+        num_points = None
+        for axis_idx, schema in enumerate(self.model.axes):
+            values = self._axis_values_numeric(
+                points, axis_idx, len(points.get(f"axis_{axis_idx}", []))
+            )
+            num_points = (
+                len(values) if num_points is None else min(num_points, len(values))
+            )
+            axis_values.append((schema, values))
+        if not num_points:
+            return [], []
+
+        columns = []
+        for schema, values in axis_values:
+            values = np.asarray(values[:num_points], dtype=float)
+            span = _axis_span(schema, values)
+            columns.append(values / span)
+        data = np.column_stack(columns)
+        finite_rows = np.all(np.isfinite(data), axis=1)
+        if not np.any(finite_rows):
+            return [0.0] * num_points, [0.0] * num_points
+
+        center = np.nanmean(data[finite_rows], axis=0)
+        centered = np.nan_to_num(data - center)
+        if np.count_nonzero(finite_rows) < 2:
+            projected = np.zeros((num_points, 2))
+        else:
+            _, _, vh = np.linalg.svd(centered[finite_rows], full_matrices=False)
+            components = np.zeros((2, data.shape[1]))
+            components[: min(2, vh.shape[0])] = vh[:2]
+            components = self._align_pca_components(components)
+            self._pca_components = components
+            projected = centered @ components.T
+        return projected[:, 0].tolist(), projected[:, 1].tolist()
+
+    def _align_pca_components(self, components):
+        if self._pca_components is None:
+            return components
+        previous = self._pca_components
+        aligned = components.copy()
+        for idx in range(min(len(previous), len(aligned))):
+            if np.dot(previous[idx], aligned[idx]) < 0:
+                aligned[idx] *= -1
+        return aligned
+
+    def _set_pca_ranges(self, plot_points):
+        x = np.asarray(plot_points["axis_0"], dtype=float)
+        y = np.asarray(plot_points["axis_1"], dtype=float)
+        finite = np.isfinite(x) & np.isfinite(y)
+        if not np.any(finite):
+            return False
+
+        def axis_range(values):
+            lower = float(np.nanmin(values[finite]))
+            upper = float(np.nanmax(values[finite]))
+            if lower == upper:
+                lower -= 0.5
+                upper += 0.5
+            else:
+                padding = 0.05 * (upper - lower)
+                lower -= padding
+                upper += padding
+            increment = max((upper - lower) / 160, 1e-12)
+            return lower, upper, increment
+
+        range_spec = (*axis_range(x), *axis_range(y))
+        if self._pca_range_spec == range_spec:
+            return False
+        self._pca_range_spec = range_spec
+        self.plot.set_axis_ranges(*range_spec)
+        return True
+
+    def _axis_values_numeric(self, points, axis_idx: int, num_points: int):
+        schema = self.model.axes[axis_idx]
+        if schema["param"]["type"] == "enum":
+            return enum_to_numeric(
+                schema["param"]["spec"]["members"].keys(),
+                points[f"axis_{axis_idx}"][:num_points],
+            )
+        return np.asarray(points[f"axis_{axis_idx}"][:num_points], dtype=float)
+
+    def _update_parameter_convergence(self, points):
+        if self.convergence_plot_item is None:
+            return
+
+        z_key = "channel_" + self.plot.active_channel_name
+        z_data = np.asarray(points.get(z_key, []), dtype=float)
+        num_points = min(
+            [len(z_data)]
+            + [
+                len(points.get(f"axis_{idx}", []))
+                for idx in range(len(self.model.axes))
+            ]
+        )
+        if num_points == 0:
+            return
+
+        while len(self.convergence_curves) < len(self.model.axes):
+            axis_idx = len(self.convergence_curves)
+            color = pyqtgraph.intColor(axis_idx, hues=len(self.model.axes))
+            curve = pyqtgraph.PlotDataItem(
+                pen=pyqtgraph.mkPen(color, width=1.5),
+                name=self._axis_description(axis_idx),
+            )
+            self.convergence_plot_item.addItem(curve)
+            self.convergence_curves.append(curve)
+
+        finite_z = np.isfinite(z_data[:num_points])
+        if not np.any(finite_z):
+            for curve in self.convergence_curves:
+                curve.setData([], [])
+            return
+
+        best_indices = np.empty(num_points, dtype=int)
+        best_idx = None
+        best_z = np.inf
+        for idx, z in enumerate(z_data[:num_points]):
+            if np.isfinite(z) and (best_idx is None or z < best_z):
+                best_idx = idx
+                best_z = z
+            best_indices[idx] = 0 if best_idx is None else best_idx
+
+        evaluations = np.arange(num_points)
+        for axis_idx, curve in enumerate(self.convergence_curves):
+            values = np.asarray(
+                self._axis_values_numeric(points, axis_idx, num_points), dtype=float
+            )
+            values = values[best_indices]
+            curve.setData(evaluations, self._normalise_axis_values(axis_idx, values))
+
+        self.convergence_plot_item.setXRange(0, max(num_points - 1, 1), padding=0)
+
+    def _normalise_axis_values(self, axis_idx: int, values):
+        schema = self.model.axes[axis_idx]
+        bounds = _axis_bounds(schema)
+        if bounds is None or bounds[0] == bounds[1]:
+            lower = np.nanmin(values)
+            upper = np.nanmax(values)
+        else:
+            lower, upper = bounds
+        if lower == upper:
+            return np.full_like(values, 0.5, dtype=float)
+        return (values - lower) / (upper - lower)
+
+    def _axis_description(self, axis_idx: int):
+        param = self.model.axes[axis_idx]["param"]
+        return param.get("description") or f"axis_{axis_idx}"
 
     def build_context_menu(self, pane_idx: int | None, builder):
-        if self.model.context.is_online_master():
+        if self.model.context.is_online_master() and not self._use_pca_projection:
             x_datasets = extract_linked_datasets(self.x_schema["param"])
             y_datasets = extract_linked_datasets(self.y_schema["param"])
             for d, axis_idx in chain(
@@ -666,13 +920,20 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
             action.setActionGroup(self.channel_menu_group)
             action.setChecked(name == self.plot.active_channel_name)
             action.triggered.connect(
-                lambda *a, name=name: self.plot.activate_channel(name)
+                lambda *a, name=name: self._activate_channel(name)
             )
 
         builder.ensure_separator()
 
         super().build_context_menu(pane_idx, builder)
         builder.ensure_separator()
+
+    def _activate_channel(self, name):
+        self.plot.activate_channel(name)
+        if self._use_pca_projection:
+            points = self.model.get_point_data()
+            if points is not None:
+                self._update_points(points, True)
 
     def _set_dataset_from_crosshair(self, dataset, axis_idx):
         if not self.plot:
@@ -688,10 +949,14 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         :param pos: Position of the click in `plot`'s coordinates.
             Here, these are in units of the point indices
         """
-        x_idx = np.floor(pos.x())
-        y_idx = np.floor(pos.y())
-        x = self.plot.x_range[0] + x_idx * self.plot.x_range[2]
-        y = self.plot.y_range[0] + y_idx * self.plot.y_range[2]
+        if self._use_pca_projection:
+            x = pos.x()
+            y = pos.y()
+        else:
+            x_idx = np.floor(pos.x())
+            y_idx = np.floor(pos.y())
+            x = self.plot.x_range[0] + x_idx * self.plot.x_range[2]
+            y = self.plot.y_range[0] + y_idx * self.plot.y_range[2]
 
         source_idx = self._xy_to_source_index(x, y)
         if source_idx is not None:
@@ -744,6 +1009,16 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         x_source = self.plot.points["axis_0"]
         y_source = self.plot.points["axis_1"]
 
+        if self._use_pca_projection:
+            distances = (
+                (np.asarray(x_source) - x) ** 2
+                + (np.asarray(y_source) - y) ** 2
+            )
+            finite = np.flatnonzero(np.isfinite(distances))
+            if not finite.size:
+                return None
+            return int(finite[np.nanargmin(distances[finite])])
+
         # KLUDGE: For some reason, the range spec/… calculation introduces more than the
         # possibly expected few ulp roundoff error; use a relatively loose tolerance of
         # 1e-14 (about 50 epsilon). A slightly cleaner solution would be to use an
@@ -756,7 +1031,6 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         if source_idx.size == 0:
             return None
 
-        # FIXME: Does not handle duplicate coordinates correctly.
         return source_idx[0]
 
     def _get_highlighted_neighbour_index(self, axis: int, step: int) -> int | None:
