@@ -205,7 +205,7 @@ class NelderMeadOptimizer(Optimizer):
         simplex = [self._clip(self._initial.copy())]
         for i in range(len(self._initial)):
             point = self._initial.copy()
-            delta = 0.05 * self._span[i]
+            delta = 0.5 * self._span[i]
             if point[i] + delta <= self._upper[i]:
                 point[i] += delta
             elif point[i] - delta >= self._lower[i]:
