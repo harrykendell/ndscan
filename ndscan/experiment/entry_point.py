@@ -808,6 +808,7 @@ class TopLevelRunner(HasEnvironment):
                 axis_value,
                 broadcast=True,
             )
+        logger.info(f"New best objective value: {value} at point {point}")
 
     def _set_optimizer_termination_reason(self, reason: str):
         self._optimizer_termination_reason = reason
@@ -816,6 +817,7 @@ class TopLevelRunner(HasEnvironment):
             reason,
             broadcast=True,
         )
+        logger.info(f"Optimizer terminated with reason: {reason}")
 
     def _set_completed(self):
         self.set_dataset(self.dataset_prefix + "completed", True, broadcast=True)
