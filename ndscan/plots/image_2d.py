@@ -7,6 +7,13 @@ from typing import Any
 import numpy as np
 import pyqtgraph
 
+try:
+    from scipy.interpolate import LinearNDInterpolator
+    from scipy.spatial import QhullError
+except ImportError:
+    LinearNDInterpolator = None
+    QhullError = ValueError
+
 from .._qt import QtCore, QtGui
 from . import colormaps
 from .cursor import CrosshairAxisLabel, CrosshairLabel, LabeledCrosshairCursor
@@ -35,8 +42,8 @@ logger = logging.getLogger(__name__)
 def _calc_range_spec(preset_min, preset_max, preset_increment, data):
     sorted_data = np.unique(data).astype(float)
 
-    lower = preset_min if preset_min else sorted_data[0]
-    upper = preset_max if preset_max else sorted_data[-1]
+    lower = preset_min if preset_min is not None else sorted_data[0]
+    upper = preset_max if preset_max is not None else sorted_data[-1]
 
     if preset_increment:
         increment = preset_increment
@@ -65,6 +72,26 @@ def _num_points_in_range(range_spec):
 def _coords_to_indices(coords, range_spec):
     min, max, increment = range_spec
     return np.rint((np.array(coords) - min) / increment).astype(int)
+
+
+def _axis_min(schema):
+    return schema.get("min", schema["param"]["spec"].get("min"))
+
+
+def _axis_max(schema):
+    return schema.get("max", schema["param"]["spec"].get("max"))
+
+
+def _axis_increment(schema):
+    return schema.get("increment", schema["param"]["spec"].get("step"))
+
+
+def _axis_bounds(schema) -> tuple[float, float] | None:
+    lower = _axis_min(schema)
+    upper = _axis_max(schema)
+    if lower is None or upper is None:
+        return None
+    return lower, upper
 
 
 class CrosshairZDataLabel(CrosshairLabel):
@@ -127,10 +154,137 @@ class ClickableImageItem(pyqtgraph.ImageItem):
 
     sigClicked = QtCore.pyqtSignal(QtCore.QPointF)
 
+    def __init__(self):
+        # ndscan stores image data as [x, y], but pyqtgraph's default col-major path
+        # swaps axes internally. With float images containing NaNs, pyqtgraph 0.13.x can
+        # then apply a transparency mask with the pre-swap indices to the post-swap
+        # image buffer. Use row-major input instead and pass a transposed contiguous
+        # array from _ImagePlot.update().
+        super().__init__(axisOrder="row-major")
+
     def mouseClickEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             self.sigClicked.emit(event.pos())
             event.accept()
+
+
+class _DelaunayInterpolationLayer:
+    """Interpolate sampled points onto the displayed image grid.
+
+    Optimiser scans generally visit irregular coordinates, so the equidistant image
+    buffer is a display surface rather than a direct representation of acquired data.
+    Delaunay triangulation gives a piecewise-linear surface inside the convex hull of
+    measured points while keeping the actual evaluation locations explicit as markers.
+    """
+
+    def __init__(self, plot_item):
+        self.plot_item = plot_item
+        self.x_range: tuple[float, float, float] | None = None
+        self.y_range: tuple[float, float, float] | None = None
+        self.values_by_coord: dict[tuple[float, float], float] = {}
+        self.marker_items = []
+
+    def reset(
+        self,
+        x_range: tuple[float, float, float],
+        y_range: tuple[float, float, float],
+    ):
+        self.x_range = x_range
+        self.y_range = y_range
+        self.values_by_coord.clear()
+        self._clear_items()
+
+    def _clear_items(self):
+        for item in self.marker_items:
+            if item.scene() is not None:
+                self.plot_item.removeItem(item)
+        self.marker_items = []
+
+    def insert(self, x: float, y: float, z: float):
+        key = (float(x), float(y))
+        self.values_by_coord[key] = float(z)
+        return key
+
+    @staticmethod
+    def _marker_pen(updated: bool):
+        pen = pyqtgraph.mkPen(
+            CONTRASTING_COLOR_TO_HIGHLIGHT if updated else (30, 30, 30, 190),
+            width=1.2 if updated else 0.8,
+        )
+        pen.setCosmetic(True)
+        return pen
+
+    def interpolate(self, fallback_data: np.ndarray) -> np.ndarray:
+        if LinearNDInterpolator is None:
+            return fallback_data
+        if self.x_range is None or self.y_range is None:
+            return fallback_data
+        if len(self.values_by_coord) < 3:
+            return fallback_data
+
+        coords = np.array(list(self.values_by_coord.keys()), dtype=float)
+        values = np.array(list(self.values_by_coord.values()), dtype=float)
+
+        x_min, x_max, _ = self.x_range
+        y_min, y_max, _ = self.y_range
+        x_coords = np.linspace(x_min, x_max, fallback_data.shape[0])
+        y_coords = np.linspace(y_min, y_max, fallback_data.shape[1])
+        grid_x, grid_y = np.meshgrid(x_coords, y_coords, indexing="ij")
+
+        try:
+            interpolator = LinearNDInterpolator(coords, values, fill_value=np.nan)
+            interpolated = interpolator(grid_x, grid_y)
+        except (QhullError, ValueError):
+            return fallback_data
+
+        # Preserve exact evaluated pixels, including early points on the hull where the
+        # triangulation can otherwise leave tiny NaN gaps due to floating point edges.
+        x_indices = _coords_to_indices(coords[:, 0], self.x_range)
+        y_indices = _coords_to_indices(coords[:, 1], self.y_range)
+        for x_idx, y_idx, value in zip(x_indices, y_indices, values):
+            if 0 <= x_idx < interpolated.shape[0] and 0 <= y_idx < interpolated.shape[1]:
+                interpolated[x_idx, y_idx] = value
+
+        return interpolated
+
+    def redraw_markers(self, updated_cell):
+        self._clear_items()
+        marker_spots = []
+        updated_marker_spots = []
+
+        for coord, value in self.values_by_coord.items():
+            if np.isnan(value):
+                continue
+
+            updated = coord == updated_cell
+            spot = {
+                "pos": coord,
+                "size": 8 if updated else 5,
+                "pen": self._marker_pen(updated),
+                "brush": pyqtgraph.mkBrush(
+                    CONTRASTING_COLOR_TO_HIGHLIGHT
+                    if updated
+                    else (255, 255, 255, 185)
+                ),
+            }
+            if updated:
+                updated_marker_spots.append(spot)
+            else:
+                marker_spots.append(spot)
+
+        if marker_spots:
+            item = pyqtgraph.ScatterPlotItem(pxMode=True)
+            item.setData(marker_spots)
+            item.setZValue(3)
+            self.plot_item.addItem(item, ignoreBounds=True)
+            self.marker_items.append(item)
+
+        if updated_marker_spots:
+            item = pyqtgraph.ScatterPlotItem(pxMode=True)
+            item.setData(updated_marker_spots)
+            item.setZValue(4)
+            self.plot_item.addItem(item, ignoreBounds=True)
+            self.marker_items.append(item)
 
 
 class _ImagePlot:
@@ -164,7 +318,9 @@ class _ImagePlot:
         self.current_z_limits = None
         self.x_range = None
         self.y_range = None
+        self.sample_data = None
         self.image_data = None
+        self.interpolated_surface = None
 
         #: Whether to average points with the same coordinates.
         self.averaging_enabled = False
@@ -252,9 +408,10 @@ class _ImagePlot:
             self.y_range = y_range
 
             # TODO: Splat old data for progressively less blurry look on refining scans?
-            self.image_data = np.full(
+            self.sample_data = np.full(
                 (_num_points_in_range(x_range), _num_points_in_range(y_range)), np.nan
             )
+            self.image_data = self.sample_data
 
             self.image_rect = QtCore.QRectF(
                 QtCore.QPointF(
@@ -266,19 +423,36 @@ class _ImagePlot:
             )
 
             num_skip = 0
+            if self.interpolated_surface is not None:
+                self.interpolated_surface.reset(x_range, y_range)
 
         # Revisit all coordinates in current image if averaging was toggled.
         if averaging_enabled != self.averaging_enabled:
             num_skip = 0
+
+        if num_skip == 0:
+            self.sample_data.fill(np.nan)
+            if self.interpolated_surface is not None:
+                self.interpolated_surface.reset(self.x_range, self.y_range)
 
         x_inds = _coords_to_indices(x_data[num_skip:num_to_show], self.x_range)
         y_inds = _coords_to_indices(y_data[num_skip:num_to_show], self.y_range)
         for i, (x_idx, y_idx) in enumerate(zip(x_inds, y_inds)):
             data_idx = num_skip + i
             coords, z = (x_data[data_idx], y_data[data_idx]), z_data[data_idx]
-            self.image_data[x_idx, y_idx] = (
+            self.sample_data[x_idx, y_idx] = (
                 self.averages_by_coords[coords][0] if averaging_enabled else z
             )
+        updated_cell = None
+        if self.interpolated_surface is not None:
+            start = num_skip
+            for data_idx in range(start, num_to_show):
+                z = self.averages_by_coords[(x_data[data_idx], y_data[data_idx])][0]
+                if not averaging_enabled:
+                    z = z_data[data_idx]
+                updated_cell = self.interpolated_surface.insert(
+                    x_data[data_idx], y_data[data_idx], z
+                )
 
         cmap = colormaps.plasma
         channel = self.channels[self.active_channel_name]
@@ -287,6 +461,10 @@ class _ImagePlot:
             cmap = colormaps.kovesi_c8
         self.colorbar.setColorMap(cmap)
 
+        self.image_data = self.sample_data
+        if self.interpolated_surface is not None:
+            self.image_data = self.interpolated_surface.interpolate(self.sample_data)
+
         # Update z autorange if active.
         z_limits = self._active_fixed_z_limits()
         if z_limits is None:  # TODO: Provide manual override.
@@ -294,10 +472,14 @@ class _ImagePlot:
         self.current_z_limits = z_limits
         self.colorbar.setLevels(z_limits)
 
-        self.image_item.setImage(self.image_data, autoLevels=False)
+        self.image_item.setImage(
+            np.ascontiguousarray(self.image_data.T), autoLevels=False
+        )
         self.z_crosshair_label.set_image_data(
             self.image_data, self.x_range, self.y_range, self.current_z_limits
         )
+        if self.interpolated_surface is not None:
+            self.interpolated_surface.redraw_markers(updated_cell)
         if num_skip == 0:
             # Image size has changed, set plot item size accordingly.
             self.image_item.setRect(self.image_rect)
@@ -368,8 +550,8 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         setup_axis(self.x_schema, "bottom")
         setup_axis(self.y_schema, "left")
 
-        def bounds(schema):
-            return (schema.get(n, None) for n in ("min", "max", "increment"))
+        def range_spec(schema):
+            return _axis_min(schema), _axis_max(schema), _axis_increment(schema)
 
         image_item = ClickableImageItem()
         image_item.sigClicked.connect(self._point_clicked)
@@ -380,10 +562,16 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
             image_item,
             colorbar,
             self.data_names[0],
-            *bounds(self.x_schema),
-            *bounds(self.y_schema),
+            *range_spec(self.x_schema),
+            *range_spec(self.y_schema),
             channels,
         )
+        self.plot.interpolated_surface = _DelaunayInterpolationLayer(self.plot_item)
+
+        x_bounds = _axis_bounds(self.x_schema)
+        y_bounds = _axis_bounds(self.y_schema)
+        if x_bounds is not None and y_bounds is not None:
+            self.plot_item.setRange(xRange=x_bounds, yRange=y_bounds, padding=0)
 
         highlight_pen = pyqtgraph.mkPen(**HIGHLIGHT_PEN)
         brush = pyqtgraph.mkBrush(CONTRASTING_COLOR_TO_HIGHLIGHT)
@@ -448,8 +636,8 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
             ):
                 action = builder.append_action(f"Set '{d}' from crosshair")
                 action.triggered.connect(
-                    lambda *a, axis_idx=axis_idx, d=d: (
-                        self._set_dataset_from_crosshair(d, axis_idx)
+                    lambda *a, axis_idx=axis_idx, d=d: self._set_dataset_from_crosshair(
+                        d, axis_idx
                     )
                 )
             if len(x_datasets) == 1 and len(y_datasets) == 1:
