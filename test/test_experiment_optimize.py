@@ -117,7 +117,7 @@ class NelderMeadOptimizerCase(HasEnvironmentCase):
                 (5.0 * scale,),
                 200,
                 1e-2,
-                0.0,
+                1e-10,
             )
             num_evals = _evaluate_optimizer(
                 opt,
