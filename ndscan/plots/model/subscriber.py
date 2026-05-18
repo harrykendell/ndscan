@@ -175,6 +175,7 @@ class SubscriberScanModel(ScanModel):
         self._analysis_results_json = None
         self._analysis_result_sources = {}
         self._point_data = {}
+        self._objective_direction = None
 
     def data_changed(
         self, values: dict[str, Any], mods: Iterable[dict[str, Any]]
@@ -209,6 +210,10 @@ class SubscriberScanModel(ScanModel):
                     # Make sure source exists.
                     self.get_analysis_result_source(name)
             self._analysis_results_json = analysis_results_json
+
+        objective_direction = values.get(self._prefix + "optimizer.objective_direction")
+        if objective_direction != self._objective_direction:
+            self._objective_direction = objective_direction
         for name, source in self._analysis_result_sources.items():
             source.set(values.get(self._prefix + "analysis_result." + name))
 
@@ -237,6 +242,9 @@ class SubscriberScanModel(ScanModel):
 
     def get_point_data(self) -> dict[str, Any]:
         return self._point_data
+
+    def get_objective_direction(self) -> str | None:
+        return self._objective_direction
 
     def get_analysis_result_source(self, name: str) -> FixedDataSource | None:
         if name not in self._analysis_result_sources:

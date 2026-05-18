@@ -1,5 +1,6 @@
 """Pseudocolor 2D plot for equidistant data."""
 
+import html
 import logging
 from itertools import chain, repeat
 from typing import Any
@@ -30,6 +31,7 @@ from .utils import (
     extract_linked_datasets,
     extract_scalar_channels,
     find_neighbour_index,
+    format_label_value,
     format_param_identity,
     get_axis_scaling_info,
     setup_axis_item,
@@ -253,7 +255,10 @@ class _DelaunayInterpolationLayer:
         x_indices = _coords_to_indices(coords[:, 0], self.x_range)
         y_indices = _coords_to_indices(coords[:, 1], self.y_range)
         for x_idx, y_idx, value in zip(x_indices, y_indices, values):
-            if 0 <= x_idx < interpolated.shape[0] and 0 <= y_idx < interpolated.shape[1]:
+            if (
+                0 <= x_idx < interpolated.shape[0]
+                and 0 <= y_idx < interpolated.shape[1]
+            ):
                 interpolated[x_idx, y_idx] = value
 
         return interpolated
@@ -273,8 +278,7 @@ class _DelaunayInterpolationLayer:
                 "size": 8 if updated else 5,
                 "pen": self._marker_pen(updated),
                 "brush": pyqtgraph.mkBrush(
-                    CONTRASTING_COLOR_TO_HIGHLIGHT
-                    if updated else (255, 255, 255, 185)
+                    CONTRASTING_COLOR_TO_HIGHLIGHT if updated else (255, 255, 255, 185)
                 ),
             }
             if updated:
@@ -522,6 +526,7 @@ class _ImagePlot:
 class Image2DPlotWidget(SliceableMenuPanesWidget):
     def __init__(self, model: ScanModel):
         super().__init__()
+        self.setBackground("w")
 
         self.model = model
 
@@ -540,20 +545,25 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         self.y_schema = self.model.axes[self.y_axis_idx]
 
         self.plot_item = self.add_pane()
-        self.plot_item.showGrid(x=True, y=True)
+        self.plot_item.showGrid(x=True, y=True, alpha=0.25)
+        self._apply_light_theme_to_pane(self.plot_item)
         self.convergence_plot_item = None
         self.convergence_curves = []
-        if self._use_pca_projection:
-            self.convergence_plot_item = self.add_pane()
-            self.convergence_plot_item.showGrid(x=True, y=True)
-            self.convergence_plot_item.setLabel("bottom", "Evaluation")
-            self.convergence_plot_item.setLabel(
-                "left", "Best-so-far parameter value", units="axis range"
-            )
-            self.convergence_plot_item.setYRange(0, 1, padding=0)
-            self.convergence_plot_item.addLegend(offset=(5, 5))
-            self.layout.setRowPreferredHeight(0, 10000)
-            self.layout.setRowPreferredHeight(1, 20000)
+        self.convergence_legend_labels = []
+        self.convergence_plot_item = self.add_pane()
+        self.convergence_plot_item.showGrid(x=True, y=True, alpha=0.25)
+        self._apply_light_theme_to_pane(self.convergence_plot_item)
+        self.convergence_plot_item.setLabel("bottom", "Evaluation")
+        self.convergence_plot_item.setLabel(
+            "left", "Best parameters", units="normalised"
+        )
+        self.convergence_plot_item.setYRange(0, 1, padding=0)
+        self.convergence_plot_item.addLegend(offset=(5, 5))
+        if self.convergence_plot_item.legend is not None:
+            self.convergence_plot_item.legend.setBrush(pyqtgraph.mkBrush(0, 0, 0, 0))
+            self.convergence_plot_item.legend.setPen(pyqtgraph.mkPen(0, 0, 0, 0))
+        self.layout.setRowPreferredHeight(0, 10000)
+        self.layout.setRowPreferredHeight(1, 20000)
         self.plot: _ImagePlot | None = None
         self.crosshair = None
         self._highlighted_xy = (None, None)
@@ -592,6 +602,8 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
 
         self.plot_item.addItem(image_item)
         colorbar = self.plot_item.addColorBar(image_item, width=15.0, interactive=False)
+        colorbar.getAxis("right").setPen(pyqtgraph.mkPen(0, 0, 0))
+        colorbar.getAxis("right").setTextPen(pyqtgraph.mkPen(0, 0, 0))
         x_range_spec = (
             (None, None, None)
             if self._use_pca_projection
@@ -647,7 +659,8 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
 
         self.subscan_roots = create_subscan_roots(self.selected_point_model)
         self.slice_roots = (
-            {} if self._use_pca_projection
+            {}
+            if self._use_pca_projection
             else create_slice_roots(self.model, self.selected_point_model)
         )
 
@@ -689,8 +702,8 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
                 self.found_duplicate_coords = False
                 self.unique_coords.clear()
                 self._set_pca_ranges(plot_points)
-                self._update_parameter_convergence(points)
                 invalidate = True
+            self._update_parameter_convergence(points)
             # If all points were unique so far, check if we have duplicates now.
             if not self.found_duplicate_coords:
                 num_skip = len(self.unique_coords)
@@ -839,6 +852,10 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
             )
             self.convergence_plot_item.addItem(curve)
             self.convergence_curves.append(curve)
+            if self.convergence_plot_item.legend is not None:
+                self.convergence_legend_labels.append(
+                    self.convergence_plot_item.legend.items[-1][1]
+                )
 
         finite_z = np.isfinite(z_data[:num_points])
         if not np.any(finite_z):
@@ -846,11 +863,18 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
                 curve.setData([], [])
             return
 
+        objective_direction = None
+        if hasattr(self.model, "get_objective_direction"):
+            objective_direction = self.model.get_objective_direction()
+        maximise = objective_direction == "max"
+
         best_indices = np.empty(num_points, dtype=int)
         best_idx = None
-        best_z = np.inf
+        best_z = -np.inf if maximise else np.inf
         for idx, z in enumerate(z_data[:num_points]):
-            if np.isfinite(z) and (best_idx is None or z < best_z):
+            if np.isfinite(z) and (
+                best_idx is None or (z > best_z if maximise else z < best_z)
+            ):
                 best_idx = idx
                 best_z = z
             best_indices[idx] = 0 if best_idx is None else best_idx
@@ -863,7 +887,56 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
             values = values[best_indices]
             curve.setData(evaluations, self._normalise_axis_values(axis_idx, values))
 
+        best_idx = best_indices[num_points - 1]
+        for axis_idx, label_item in enumerate(self.convergence_legend_labels):
+            schema = self.model.axes[axis_idx]
+            param = schema["param"]
+            name = param.get("description") or f"axis_{axis_idx}"
+            value = points[f"axis_{axis_idx}"][best_idx]
+            label_item.setText(
+                self._styled_legend_text(
+                    f"{name}: {self._format_tracking_value(schema, value)}"
+                )
+            )
+        if self.convergence_plot_item.legend is not None:
+            self.convergence_plot_item.legend.updateSize()
+
         self.convergence_plot_item.setXRange(0, max(num_points - 1, 1), padding=0)
+
+    def _format_tracking_value(self, schema, value):
+        param = schema["param"]
+        param_type = param["type"]
+        spec = param["spec"]
+        if param_type == "bool":
+            return "True" if bool(value) else "False"
+        if param_type == "enum":
+            members = spec.get("members", {})
+            return str(members.get(value, members.get(str(value), value)))
+
+        unit_suffix, data_to_display_scale = get_axis_scaling_info(spec)
+        try:
+            return format_label_value(float(value), data_to_display_scale, (value, value), unit_suffix)
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _styled_legend_text(self, text: str) -> str:
+        escaped = html.escape(text)
+        # Use an 8-direction shadow to approximate a text outline in Qt rich text.
+        return (
+            "<span style=\"color: black;"
+            " text-shadow:"
+            " -1px 0 white, 0 1px white, 1px 0 white, 0 -1px white,"
+            " -1px -1px white, -1px 1px white, 1px -1px white, 1px 1px white;\">"
+            f"{escaped}</span>"
+        )
+
+    def _apply_light_theme_to_pane(self, pane):
+        for axis_name in ("left", "bottom", "right", "top"):
+            axis = pane.getAxis(axis_name)
+            if axis is None:
+                continue
+            axis.setPen(pyqtgraph.mkPen(0, 0, 0))
+            axis.setTextPen(pyqtgraph.mkPen(0, 0, 0))
 
     def _normalise_axis_values(self, axis_idx: int, values):
         schema = self.model.axes[axis_idx]
@@ -919,9 +992,7 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
             action.setCheckable(True)
             action.setActionGroup(self.channel_menu_group)
             action.setChecked(name == self.plot.active_channel_name)
-            action.triggered.connect(
-                lambda *a, name=name: self._activate_channel(name)
-            )
+            action.triggered.connect(lambda *a, name=name: self._activate_channel(name))
 
         builder.ensure_separator()
 
@@ -1010,10 +1081,9 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         y_source = self.plot.points["axis_1"]
 
         if self._use_pca_projection:
-            distances = (
-                (np.asarray(x_source) - x) ** 2
-                + (np.asarray(y_source) - y) ** 2
-            )
+            distances = (np.asarray(x_source) - x) ** 2 + (
+                np.asarray(y_source) - y
+            ) ** 2
             finite = np.flatnonzero(np.isfinite(distances))
             if not finite.size:
                 return None

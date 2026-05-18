@@ -509,10 +509,10 @@ def add_source_id_label(
             return self.setPos(xmin, ymin)
 
     text_item = SourceIdTextItem(
-        text="", anchor=(0, 1), color=(255, 255, 255), fill=(0, 0, 0)
+        text="", anchor=(0, 1), color=(0, 0, 0), fill=(255, 255, 255, 220)
     )
     text_item.setZValue(1000)
-    text_item.setOpacity(0.3)
+    text_item.setOpacity(1.0)
     view_box.addItem(text_item, ignoreBounds=True)
 
     context.source_id_changed.connect(text_item.setText)

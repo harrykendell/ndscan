@@ -81,6 +81,9 @@ class HDF5ScanModel(ScanModel):
         super().__init__(axes, schema_revision, context)
 
         self._channel_schemata = json.loads(datasets[prefix + "channels"][()])
+        self._objective_direction = datasets.get(prefix + "optimizer.objective_direction")
+        if self._objective_direction is not None:
+            self._objective_direction = self._objective_direction[()]
 
         self._analysis_result_sources = {}
         ark = prefix + "analysis_results"
@@ -108,6 +111,13 @@ class HDF5ScanModel(ScanModel):
 
     def get_point_data(self) -> dict[str, Any]:
         return self._point_data
+
+    def get_objective_direction(self) -> str | None:
+        if self._objective_direction is None:
+            return None
+        if isinstance(self._objective_direction, bytes):
+            return self._objective_direction.decode()
+        return str(self._objective_direction)
 
     def get_analysis_result_source(self, name: str) -> FixedDataSource | None:
         if name not in self._analysis_result_sources:
