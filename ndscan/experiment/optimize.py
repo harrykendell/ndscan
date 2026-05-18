@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from itertools import repeat
 from typing import Any
 
@@ -15,6 +15,8 @@ from .scan_runner import ScanAxis, select_runner_class
 __all__ = [
     "ObjectiveSpec",
     "OptimizeAlgorithmSpec",
+    "NelderMeadOptimizeAlgorithmSpec",
+    "CoordinateSearchOptimizeAlgorithmSpec",
     "OptimizeAcquisitionSpec",
     "OptimizeAxis",
     "OptimizeSpec",
@@ -23,6 +25,7 @@ __all__ = [
     "CoordinateSearchOptimizer",
     "OptimizeRunner",
     "describe_optimise",
+    "build_algorithm_spec",
     "ALGORITHM_REGISTRY",
 ]
 
@@ -35,10 +38,23 @@ class ObjectiveSpec:
 
 @dataclass
 class OptimizeAlgorithmSpec:
-    kind: str = "nelder_mead"
+    kind: str
+
+
+@dataclass
+class NelderMeadOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
     max_evals: int = 100
     xatol: float = 1e-3
     fatol: float = 1e-3
+    simplex_step_fraction: float = 0.25
+
+
+@dataclass
+class CoordinateSearchOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
+    max_evals: int = 100
+    xatol: float = 1e-3
+    fatol: float = 1e-3
+    step_reduction_factor: float = 0.5
 
 
 @dataclass
@@ -125,6 +141,43 @@ ALGORITHM_REGISTRY = {
         ],
     },
 }
+
+
+def build_algorithm_spec(algorithm: dict[str, Any]) -> OptimizeAlgorithmSpec:
+    algorithm_kind = algorithm.get("kind", "nelder_mead")
+    if algorithm_kind == "nelder_mead":
+        spec_cls = NelderMeadOptimizeAlgorithmSpec
+    elif algorithm_kind == "coordinate_search":
+        spec_cls = CoordinateSearchOptimizeAlgorithmSpec
+    else:
+        raise ValueError(f"Unsupported optimisation algorithm '{algorithm_kind}'")
+
+    algo_info = ALGORITHM_REGISTRY[algorithm_kind]
+    params_by_name = {param.name: param for param in algo_info["parameters"]}
+    kwargs: dict[str, Any] = {"kind": algorithm_kind}
+
+    for field in fields(spec_cls):
+        if field.name == "kind":
+            continue
+        param = params_by_name.get(field.name)
+        if param is None:
+            raise ValueError(
+                f"Algorithm spec '{spec_cls.__name__}' has no registry entry for field '{field.name}'"
+            )
+
+        raw_value = algorithm.get(field.name, param.default)
+        if isinstance(param.default, int) and not isinstance(param.default, bool):
+            value = int(raw_value)
+        else:
+            value = float(raw_value)
+
+        if value < param.minimum or value > param.maximum:
+            raise ValueError(
+                f"Optimisation {field.name} must be between {param.minimum} and {param.maximum}"
+            )
+        kwargs[field.name] = value
+
+    return spec_cls(**kwargs)
 
 @dataclass
 class OptimizeAxis:
@@ -642,42 +695,31 @@ def create_optimizer(spec: OptimizeSpec) -> Optimizer:
     upper_bounds = tuple(axis.upper for axis in spec.axes)
 
     algorithm_kind = spec.algorithm.kind
-    if algorithm_kind not in ALGORITHM_REGISTRY:
-        raise ValueError(f"Unsupported optimisation algorithm '{algorithm_kind}'")
-
-    # Extract algorithm-specific parameters from the spec based on registry definition
-    algo_params = {}
-    algo_info = ALGORITHM_REGISTRY[algorithm_kind]
-    for param in algo_info["parameters"]:
-        param_name = param.name
-        if hasattr(spec.algorithm, param_name):
-            algo_params[param_name] = getattr(spec.algorithm, param_name)
-        else:
-            # Use default from registry if not present in spec
-            algo_params[param_name] = param.default
-
-    # Instantiate the appropriate optimizer with extracted parameters
-    if algorithm_kind == "nelder_mead":
+    if isinstance(spec.algorithm, NelderMeadOptimizeAlgorithmSpec):
         return NelderMeadOptimizer(
             initial,
             lower_bounds,
             upper_bounds,
-            algo_params.get("max_evals", 100),
-            algo_params.get("xatol", 1e-3),
-            algo_params.get("fatol", 1e-3),
-            algo_params.get("simplex_step_fraction", 0.25),
+            spec.algorithm.max_evals,
+            spec.algorithm.xatol,
+            spec.algorithm.fatol,
+            spec.algorithm.simplex_step_fraction,
         )
-    if algorithm_kind == "coordinate_search":
+    if isinstance(spec.algorithm, CoordinateSearchOptimizeAlgorithmSpec):
         return CoordinateSearchOptimizer(
             initial,
             lower_bounds,
             upper_bounds,
-            algo_params.get("max_evals", 100),
-            algo_params.get("xatol", 1e-3),
-            algo_params.get("fatol", 1e-3),
-            algo_params.get("step_reduction_factor", 0.5),
+            spec.algorithm.max_evals,
+            spec.algorithm.xatol,
+            spec.algorithm.fatol,
+            spec.algorithm.step_reduction_factor,
         )
-    raise ValueError(f"Unsupported optimisation algorithm '{algorithm_kind}'")
+    if algorithm_kind not in ALGORITHM_REGISTRY:
+        raise ValueError(f"Unsupported optimisation algorithm '{algorithm_kind}'")
+    raise TypeError(
+        f"Unsupported optimisation algorithm spec type '{type(spec.algorithm).__name__}'"
+    )
 
 
 class OptimizeRunner(HasEnvironment):

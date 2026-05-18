@@ -50,11 +50,11 @@ from .fragment import (
 )
 from .optimize import (
     OptimizeAcquisitionSpec,
-    OptimizeAlgorithmSpec,
     ObjectiveSpec,
     OptimizeAxis,
     OptimizeRunner,
     OptimizeSpec,
+    build_algorithm_spec,
     describe_optimise,
     minimum_optimizer_evaluations,
 )
@@ -408,9 +408,6 @@ class ArgumentInterface(HasEnvironment):
         algorithm = optimise.get("algorithm", {})
         num_repeats_per_point = int(optimise.get("num_repeats_per_point", 1))
         averaging_method = optimise.get("averaging_method", "mean")
-        max_evals = int(algorithm.get("max_evals", 100))
-        xatol = float(algorithm.get("xatol", 1e-3))
-        fatol = float(algorithm.get("fatol", 1e-3))
         if num_repeats_per_point < 1:
             raise ScanSpecError(
                 "Optimisation num_repeats_per_point must be positive"
@@ -419,26 +416,17 @@ class ArgumentInterface(HasEnvironment):
             raise ScanSpecError(
                 "Optimisation averaging_method must be 'mean' or 'median'"
             )
-        if max_evals < 1:
-            raise ScanSpecError("Optimisation max_evals must be positive")
-        if xatol < 0.0 or xatol > 1.0:
-            raise ScanSpecError(
-                "Optimisation xatol must be between 0 and 1 (fraction of span)"
-            )
-        if fatol < 0.0:
-            raise ScanSpecError("Optimisation fatol must be non-negative")
+        try:
+            algorithm_spec = build_algorithm_spec(algorithm)
+        except ValueError as error:
+            raise ScanSpecError(str(error)) from error
         spec = OptimizeSpec(
             axes,
             ObjectiveSpec(
                 objective.get("channel", ""),
                 objective.get("direction", "min"),
             ),
-            OptimizeAlgorithmSpec(
-                algorithm.get("kind", "nelder_mead"),
-                max_evals,
-                xatol,
-                fatol,
-            ),
+            algorithm_spec,
             OptimizeAcquisitionSpec(num_repeats_per_point, averaging_method),
         )
         return spec, optimise.get("skip_on_persistent_transitory_error", False)
