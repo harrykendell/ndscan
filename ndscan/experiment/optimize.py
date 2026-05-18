@@ -23,6 +23,7 @@ __all__ = [
     "CoordinateSearchOptimizer",
     "OptimizeRunner",
     "describe_optimise",
+    "ALGORITHM_REGISTRY",
 ]
 
 
@@ -45,6 +46,85 @@ class OptimizeAcquisitionSpec:
     num_repeats_per_point: int = 1
     averaging_method: str = "mean"
 
+
+@dataclass
+class AlgorithmParameter:
+    """Metadata for an algorithm parameter."""
+
+    name: str
+    label: str
+    minimum: float
+    maximum: float
+    default: float
+    step: float | None = None
+    tooltip: str = ""
+
+fatol = AlgorithmParameter(
+    name="fatol",
+    label="fatol",
+    minimum=0.0,
+    maximum=10**9,
+    default=1e-3,
+    tooltip="Terminate when the objective value changes by at most this amount.",
+)
+max_evals = AlgorithmParameter(
+    name="max_evals",
+    label="max_evals",
+    minimum=1,
+    maximum=10**7,
+    default=100,
+    step=1,
+    tooltip="Maximum number of objective evaluations before stopping.",
+)
+xatol = AlgorithmParameter(
+    name="xatol",
+    label="xatol",
+    minimum=0.0,
+    maximum=1.0,
+    default=1e-3,
+    step=1e-4,
+    tooltip="Terminate when each axis moves by at most this fraction of its configured bounds span.",
+)
+
+
+ALGORITHM_REGISTRY = {
+    "nelder_mead": {
+        "display_name": "Nelder-Mead",
+        "description": "Local derivative-free simplex method",
+        "parameters": [
+            max_evals,
+            fatol,
+            xatol,
+            AlgorithmParameter(
+                name="simplex_step_fraction",
+                label="simplex_step_fraction",
+                minimum=0.01,
+                maximum=1.0,
+                default=0.25,
+                step=0.01,
+                tooltip="Initial simplex step size as a fraction of the parameter bounds span.",
+            ),
+        ],
+    },
+    "coordinate_search": {
+        "display_name": "Coordinate search",
+        "description": "Simple bounded coordinate-search optimizer",
+        "parameters": [
+            max_evals,
+            fatol,
+            xatol,
+            AlgorithmParameter(
+                name="step_reduction_factor",
+                label="step_reduction_factor",
+                minimum=0.1,
+                maximum=0.9,
+                default=0.5,
+                step=0.05,
+                tooltip="Fraction to reduce step sizes by when no improvement is found in a cycle.",
+            ),
+        ],
+    },
+}
 
 @dataclass
 class OptimizeAxis:
@@ -109,6 +189,7 @@ class NelderMeadOptimizer(Optimizer):
         max_evals: int,
         xatol: float,
         fatol: float,
+        simplex_step_fraction: float = 0.25,
     ):
         self._initial = np.array(initial, dtype=float)
         self._lower = np.array(lower_bounds, dtype=float)
@@ -117,6 +198,7 @@ class NelderMeadOptimizer(Optimizer):
         self._max_evals = max_evals
         self._xatol = xatol
         self._fatol = fatol
+        self._simplex_step_fraction = simplex_step_fraction
 
         self._alpha = 1.0
         self._gamma = 2.0
@@ -205,7 +287,7 @@ class NelderMeadOptimizer(Optimizer):
         simplex = [self._clip(self._initial.copy())]
         for i in range(len(self._initial)):
             point = self._initial.copy()
-            delta = 0.5 * self._span[i]
+            delta = self._simplex_step_fraction * self._span[i]
             if point[i] + delta <= self._upper[i]:
                 point[i] += delta
             elif point[i] - delta >= self._lower[i]:
@@ -385,6 +467,7 @@ class CoordinateSearchOptimizer(Optimizer):
         max_evals: int,
         xatol: float,
         fatol: float,
+        step_reduction_factor: float = 0.5,
     ):
         self._initial = np.array(initial, dtype=float)
         self._lower = np.array(lower_bounds, dtype=float)
@@ -393,6 +476,7 @@ class CoordinateSearchOptimizer(Optimizer):
         self._max_evals = max_evals
         self._xatol = xatol
         self._fatol = fatol
+        self._step_reduction_factor = step_reduction_factor
 
         if len(self._initial) == 0:
             raise ValueError("Need at least one optimization axis")
@@ -526,9 +610,8 @@ class CoordinateSearchOptimizer(Optimizer):
 
         improvement = self._cycle_start_value - self._current_value
         if self._cycle_improved:
-            if (
-                improvement <= self._fatol
-                and np.all(self._step_sizes <= self._minimum_step)
+            if improvement <= self._fatol and np.all(
+                self._step_sizes <= self._minimum_step
             ):
                 self._termination_reason = "converged"
                 return
@@ -536,7 +619,7 @@ class CoordinateSearchOptimizer(Optimizer):
             if np.all(self._step_sizes <= self._minimum_step):
                 self._termination_reason = "converged"
                 return
-            self._step_sizes /= 2.0
+            self._step_sizes *= self._step_reduction_factor
 
         self._axis_index = 0
         self._direction_index = 0
@@ -558,25 +641,43 @@ def create_optimizer(spec: OptimizeSpec) -> Optimizer:
     lower_bounds = tuple(axis.lower for axis in spec.axes)
     upper_bounds = tuple(axis.upper for axis in spec.axes)
 
-    if spec.algorithm.kind == "nelder_mead":
+    algorithm_kind = spec.algorithm.kind
+    if algorithm_kind not in ALGORITHM_REGISTRY:
+        raise ValueError(f"Unsupported optimisation algorithm '{algorithm_kind}'")
+
+    # Extract algorithm-specific parameters from the spec based on registry definition
+    algo_params = {}
+    algo_info = ALGORITHM_REGISTRY[algorithm_kind]
+    for param in algo_info["parameters"]:
+        param_name = param.name
+        if hasattr(spec.algorithm, param_name):
+            algo_params[param_name] = getattr(spec.algorithm, param_name)
+        else:
+            # Use default from registry if not present in spec
+            algo_params[param_name] = param.default
+
+    # Instantiate the appropriate optimizer with extracted parameters
+    if algorithm_kind == "nelder_mead":
         return NelderMeadOptimizer(
             initial,
             lower_bounds,
             upper_bounds,
-            spec.algorithm.max_evals,
-            spec.algorithm.xatol,
-            spec.algorithm.fatol,
+            algo_params.get("max_evals", 100),
+            algo_params.get("xatol", 1e-3),
+            algo_params.get("fatol", 1e-3),
+            algo_params.get("simplex_step_fraction", 0.25),
         )
-    if spec.algorithm.kind == "coordinate_search":
+    if algorithm_kind == "coordinate_search":
         return CoordinateSearchOptimizer(
             initial,
             lower_bounds,
             upper_bounds,
-            spec.algorithm.max_evals,
-            spec.algorithm.xatol,
-            spec.algorithm.fatol,
+            algo_params.get("max_evals", 100),
+            algo_params.get("xatol", 1e-3),
+            algo_params.get("fatol", 1e-3),
+            algo_params.get("step_reduction_factor", 0.5),
         )
-    raise ValueError(f"Unsupported optimisation algorithm '{spec.algorithm.kind}'")
+    raise ValueError(f"Unsupported optimisation algorithm '{algorithm_kind}'")
 
 
 class OptimizeRunner(HasEnvironment):
@@ -635,7 +736,9 @@ class OptimizeRunner(HasEnvironment):
                             current_objective_samples.clear()
                             point_loaded = False
                         if not point_loaded:
-                            point_runner.set_points(repeat(current_point, repeats_per_point))
+                            point_runner.set_points(
+                                repeat(current_point, repeats_per_point)
+                            )
                             point_loaded = True
 
                         completed = point_runner.acquire(device_cleanup=False)

@@ -6,11 +6,12 @@ from collections import Counter, OrderedDict
 from functools import partial
 from typing import Any
 
-from artiq.gui.scientific_spinbox import ScientificSpinBox
+from sipyco import pyon
+
 from artiq.gui.entries import procdesc_to_entry
 from artiq.gui.fuzzy_select import FuzzySelectWidget
+from artiq.gui.scientific_spinbox import ScientificSpinBox
 from artiq.gui.tools import LayoutWidget, WheelFilter, disable_scroll_wheel
-from sipyco import pyon
 
 from .._qt import QtCore, QtGui, QtWidgets
 from ..utils import (
@@ -20,6 +21,7 @@ from ..utils import (
     merge_ndscan_params,
     shorten_to_unambiguous_suffixes,
 )
+from ..experiment.optimize import ALGORITHM_REGISTRY
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
 from .scan_options import list_scan_option_types
 from .utils import (
@@ -250,9 +252,7 @@ class ScanOptions:
         self.objective_container.setLayout(objective_layout)
 
         self.objective_box = QtWidgets.QComboBox()
-        self.objective_box.setToolTip(
-            "Select the numeric result channel to optimise."
-        )
+        self.objective_box.setToolTip("Select the numeric result channel to optimise.")
         self._add_objective_channel("<Select objective channel>", "")
         result_channels = current_params.get("result_channels", {})
 
@@ -306,8 +306,12 @@ class ScanOptions:
         algorithm_settings_layout.addLayout(algorithm_row_layout)
         self.algorithm_kind_map = {}
         self.algorithm_box = QtWidgets.QComboBox()
-        self._add_algorithm_choice("Nelder-Mead", "nelder_mead")
-        self._add_algorithm_choice("Coordinate search", "coordinate_search")
+
+        # Populate algorithm choices from registry
+        for kind, algo_info in ALGORITHM_REGISTRY.items():
+            display_name = algo_info["display_name"]
+            self._add_algorithm_choice(display_name, kind)
+
         self.algorithm_box.setToolTip("Choose the optimisation algorithm.")
         algorithm_row_layout.addWidget(self.algorithm_box)
         algorithm_row_layout.setStretchFactor(self.algorithm_box, 1)
@@ -324,43 +328,57 @@ class ScanOptions:
                 self._add_algorithm_choice(missing_label, current_algorithm_kind)
                 self.algorithm_box.setCurrentText(missing_label)
 
-        max_evals_label = QtWidgets.QLabel("max_evals:")
-        algorithm_row_layout.addWidget(max_evals_label)
-        self.max_evals_box = QtWidgets.QSpinBox()
-        self.max_evals_box.setMinimum(1)
-        self.max_evals_box.setMaximum(10**7)
-        self.max_evals_box.setToolTip(
-            "Maximum number of objective evaluations before stopping."
-        )
-        self.max_evals_box.setValue(current_algorithm.get("max_evals", 100))
-        self.max_evals_box.setMinimumWidth(self.max_evals_box.minimumSizeHint().width())
-        algorithm_row_layout.addWidget(self.max_evals_box)
-        algorithm_row_layout.addStretch()
+        # Store parameter widgets by algorithm kind and parameter name
+        self.algorithm_parameter_widgets = {}
+        self.algorithm_parameter_layouts = []
 
-        tolerance_layout = QtWidgets.QHBoxLayout()
-        algorithm_settings_layout.addLayout(tolerance_layout)
+        # Create parameter layouts for each algorithm
+        for kind, algo_info in ALGORITHM_REGISTRY.items():
+            self.algorithm_parameter_widgets[kind] = {}
 
-        fatol_label = QtWidgets.QLabel("fatol:")
-        tolerance_layout.addWidget(fatol_label)
-        self.fatol_box = _make_algorithm_value_box(
-            0.0, 10**9, current_algorithm.get("fatol", 1e-3)
-        )
-        self.fatol_box.setToolTip(
-            "Terminate when the objective value changes by at most this amount."
-        )
-        tolerance_layout.addWidget(self.fatol_box)
+            # Create a container for this algorithm's parameters
+            params_container = QtWidgets.QWidget()
+            params_layout = QtWidgets.QVBoxLayout()
+            params_layout.setContentsMargins(0, 0, 0, 0)
 
-        xatol_label = QtWidgets.QLabel("xatol:")
-        tolerance_layout.addWidget(xatol_label)
-        self.xatol_box = _make_algorithm_value_box(
-            0.0, 1.0, current_algorithm.get("xatol", 1e-3), step=1e-4
-        )
-        self.xatol_box.setToolTip(
-            "Terminate when each axis moves by at most this fraction of its "
-            "configured bounds span."
-        )
-        tolerance_layout.addWidget(self.xatol_box)
-        tolerance_layout.addStretch()
+            # Create widgets for each parameter
+            for param in algo_info["parameters"]:
+                param_row_layout = QtWidgets.QHBoxLayout()
+
+                # Create label
+                label = QtWidgets.QLabel(f"{param.label}:")
+                param_row_layout.addWidget(label)
+
+                # Create appropriate input widget
+                if param.name == "max_evals":
+                    widget = QtWidgets.QSpinBox()
+                    widget.setMinimum(int(param.minimum))
+                    widget.setMaximum(int(param.maximum))
+                    widget.setValue(
+                        int(current_algorithm.get(param.name, param.default))
+                    )
+                    # widget.setMinimumWidth(widget.minimumSizeHint().width())
+                else:
+                    widget = _make_algorithm_value_box(
+                        param.minimum,
+                        param.maximum,
+                        current_algorithm.get(param.name, param.default),
+                        step=param.step,
+                    )
+
+                widget.setToolTip(param.tooltip)
+                param_row_layout.addWidget(widget)
+                # param_row_layout.addStretch()
+
+                params_layout.addLayout(param_row_layout)
+                self.algorithm_parameter_widgets[kind][param.name] = widget
+
+            params_container.setLayout(params_layout)
+            self.algorithm_parameter_layouts.append((kind, params_container))
+            algorithm_settings_layout.addWidget(params_container)
+
+        # Show/hide parameter containers based on selected algorithm
+        self._update_algorithm_parameters()
 
         self.optimise_acquisition_container = QtWidgets.QWidget()
         optimise_acquisition_layout = QtWidgets.QHBoxLayout()
@@ -378,9 +396,7 @@ class ScanOptions:
         self.optimise_num_repeats_per_point_box.setValue(
             current_optimise.get("num_repeats_per_point", 1)
         )
-        optimise_acquisition_layout.addWidget(
-            self.optimise_num_repeats_per_point_box
-        )
+        optimise_acquisition_layout.addWidget(self.optimise_num_repeats_per_point_box)
 
         averaging_label = QtWidgets.QLabel("Averaging:")
         optimise_acquisition_layout.addWidget(averaging_label)
@@ -426,9 +442,6 @@ class ScanOptions:
             self.objective_box,
             self.objective_direction_box,
             self.algorithm_box,
-            self.max_evals_box,
-            self.xatol_box,
-            self.fatol_box,
             self.optimise_num_repeats_per_point_box,
             self.optimise_averaging_method_box,
             self.optimise_skip_persistently_failing_box,
@@ -441,6 +454,11 @@ class ScanOptions:
                 widget.stateChanged.connect(self._update_visibility)
             except AttributeError:
                 pass
+
+        # Connect algorithm box to update parameter visibility
+        self.algorithm_box.currentIndexChanged.connect(
+            self._update_algorithm_parameters
+        )
 
         self._update_visibility()
 
@@ -467,9 +485,6 @@ class ScanOptions:
             self.objective_box,
             self.objective_direction_box,
             self.algorithm_box,
-            self.max_evals_box,
-            self.xatol_box,
-            self.fatol_box,
             self.optimise_num_repeats_per_point_box,
             self.optimise_averaging_method_box,
             self.optimise_skip_persistently_failing_box,
@@ -487,7 +502,28 @@ class ScanOptions:
             except AttributeError:
                 pass
 
+        # Connect algorithm parameter widgets
+        for algo_kind, params_dict in self.algorithm_parameter_widgets.items():
+            for param_name, widget in params_dict.items():
+                try:
+                    widget.currentIndexChanged.connect(callback)
+                except AttributeError:
+                    pass
+                try:
+                    widget.valueChanged.connect(callback)
+                except AttributeError:
+                    pass
+                try:
+                    widget.stateChanged.connect(callback)
+                except AttributeError:
+                    pass
+
     def get_rows(self) -> list[tuple[str, QtWidgets.QWidget]]:
+        # Create separator widget
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+
         return [
             ("Execution mode", self.execution_mode_container),
             ("Number of repeats of scan", self.num_repeats_container),
@@ -502,12 +538,13 @@ class ScanOptions:
                 self.skip_persistently_failing_container,
             ),
             ("Objective channel", self.objective_container),
-            ("Algorithm settings", self.algorithm_settings_container),
             ("Point acquisition", self.optimise_acquisition_container),
             (
                 "Apply maximally bad objective result if transitory errors persist",
                 self.optimise_skip_persistently_failing_container,
             ),
+            ("", separator),
+            ("Algorithm settings", self.algorithm_settings_container),
         ]
 
     def register_row_item(
@@ -550,10 +587,15 @@ class ScanOptions:
             "kind": self.algorithm_kind_map.get(
                 self.algorithm_box.currentText(), "nelder_mead"
             ),
-            "max_evals": self.max_evals_box.value(),
-            "xatol": self.xatol_box.value(),
-            "fatol": self.fatol_box.value(),
         }
+
+        # Add parameters from the currently selected algorithm
+        current_algorithm_kind = optimise["algorithm"]["kind"]
+        if current_algorithm_kind in self.algorithm_parameter_widgets:
+            for param_name, widget in self.algorithm_parameter_widgets[
+                current_algorithm_kind
+            ].items():
+                optimise["algorithm"][param_name] = widget.value()
         optimise["num_repeats_per_point"] = (
             self.optimise_num_repeats_per_point_box.value()
         )
@@ -584,6 +626,14 @@ class ScanOptions:
             self.optimise_skip_persistently_failing_container,
         ]:
             self._set_row_visible(widget, not is_scan)
+
+    def _update_algorithm_parameters(self, *_args):
+        """Show/hide parameter containers based on selected algorithm."""
+        current_algorithm_kind = self.algorithm_kind_map.get(
+            self.algorithm_box.currentText(), "nelder_mead"
+        )
+        for kind, container in self.algorithm_parameter_layouts:
+            container.setVisible(kind == current_algorithm_kind)
 
     def _set_row_visible(self, widget: QtWidgets.QWidget, visible: bool) -> None:
         widget.setVisible(visible)
@@ -768,9 +818,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             tooltip = "Reset all variable parameters back to Fixed."
         elif self.scan_options.current_mode() == ExecutionMode.optimise.name:
             text = "Disable all optimisations"
-            tooltip = (
-                "Reset all optimisation parameters back to Fixed values."
-            )
+            tooltip = "Reset all optimisation parameters back to Fixed values."
         else:
             text = "Disable all scans"
             tooltip = "Reset all scan parameters back to Fixed values."
@@ -1045,9 +1093,9 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
 
     def _set_override_line_active(self):
         self._update_param_choice_map()
-        self._add_override_prompt_box.set_choices(
-            [(s, 0) for s in self._param_choice_map.keys()]
-        )
+        self._add_override_prompt_box.set_choices([
+            (s, 0) for s in self._param_choice_map.keys()
+        ])
 
         self._add_override_line.setEnabled(False)
         self._add_override_line.setVisible(False)
@@ -1388,7 +1436,9 @@ class OverrideEntry(LayoutWidget):
             )
             return
         with QtCore.QSignalBlocker(self.scan_type):
-            self.scan_type.setCurrentIndex(self._visible_option_indices.index(option_idx))
+            self.scan_type.setCurrentIndex(
+                self._visible_option_indices.index(option_idx)
+            )
         self._set_current_index(option_idx)
 
     def _set_current_index(self, new_idx) -> None:
