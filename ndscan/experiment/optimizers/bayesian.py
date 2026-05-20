@@ -6,6 +6,7 @@ import numpy as np
 import numpy.typing as npt
 
 # import ML libraries
+from random import randint
 import torch
 from botorch.acquisition.analytic import LogExpectedImprovement
 from botorch.acquisition.monte_carlo import (
@@ -34,7 +35,6 @@ class BayesianOptimizerOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
     fatol: float = 1e-3
     n_init: int = 50
     m_samples: int = 3
-    n_points: int = 3
     # acq_func_type: str = "logEI"
     user_seed: int = -1
 
@@ -60,7 +60,6 @@ class BayesianOptimizer(Optimizer):
         fatol: float,
         n_init: int,  # no.of initial samples to generate
         m_samples: int,  # no.of repeated shots per sample
-        n_points: int,  # no.of points to explore
         # acq_func_type : str,                            # acquisition function type
         user_seed: int,  # user defined seed
     ):
@@ -68,11 +67,6 @@ class BayesianOptimizer(Optimizer):
         # simulation parameters
         self.n_init = n_init
         self.m_samples = m_samples
-
-        if n_points is None:
-            self.n_points = 1
-        else:
-            self.n_points = n_points
 
         # select the acquisition function type
         self.acq_func_type = "logEI"
@@ -126,7 +120,7 @@ class BayesianOptimizer(Optimizer):
 
         if self.iter_idx == 0:
             # initial sampling
-            if self.sample_idx < (self.n_init - 1):
+            if self.sample_idx < self.n_init:
                 # make parameter dictionary
                 x_point = self.x[self.sample_idx, :]
 
@@ -158,7 +152,9 @@ class BayesianOptimizer(Optimizer):
 
         return None
 
-    def tell(self, point: tuple[float, ...], value: float, std_dev: float = 0.0) -> None:
+    def tell(
+        self, point: tuple[float, ...], value: float, std_dev: float = 0.0
+    ) -> None:
         """
         Runs the experiment for the given parameters by :meth:`ask`
         and updates the measured objective value and its standard deviation.
@@ -171,6 +167,7 @@ class BayesianOptimizer(Optimizer):
             - None. Updates the observations
         """
         del point
+        # TODO: We should check for convergence somewhere otherwise we go forever?
 
         if self._termination_reason is not None:
             return None
@@ -178,7 +175,7 @@ class BayesianOptimizer(Optimizer):
         # convert to torch tensors and append the data set with the new point(s)
         self.init_y = torch.cat((
             self.init_y,
-            torch.tensor(value).reshape(1, 1),
+            torch.tensor(-value).reshape(1, 1),
         ))  # update y-values
         self.init_y_var = torch.cat((
             self.init_y_var,
@@ -206,8 +203,10 @@ class BayesianOptimizer(Optimizer):
         if self.init_y.numel() == 0:
             return None
 
-        # get model parameters at this index
+        # select the single best observation
         best_idx = int(torch.argmax(self.init_y).item())
+
+        # get model parameters at this index
         best_x_norm = self.init_x[best_idx]
 
         # convert parameters back to physical units
@@ -322,23 +321,20 @@ class BayesianOptimizer(Optimizer):
             - candidates: candidate(s) found while using a given AF
         """
         # create the GP models
-        model, mll = self.build_surrogate_model(
-            self.init_x, self.init_y, self.init_y_var
-        )
+        model, mll = self.build_surrogate_model()
 
         # fit the model for hyperparameter optimization
+        # TODO: This can fail !!! wrap it in a try and handle it somewhow
         fit_gpytorch_mll(mll)
 
         # create the acquisition function
-        acq_func = self.get_acquisition_function(
-            model, self.best_init_y, self.acq_func_type
-        )
+        acq_func = self.get_acquisition_function(model)
 
         # find candidates
         candidates, _ = optimize_acqf(
             acq_function=acq_func,
             bounds=self.unit_bounds,
-            q=self.n_points,
+            q=1,
             num_restarts=200,
             raw_samples=1024,
             options={"batch_limit": 5, "maxiter": 200},
@@ -369,13 +365,10 @@ class BayesianOptimizer(Optimizer):
         Outputs:
             - unit_bounds : ((2, d') tensor) unit bounds
         """
-        # get number of active parameters
-        d = self.n_params
-
         # create bounds
         unit_bounds = torch.stack([
-            torch.zeros(d, dtype=torch.double),
-            torch.ones(d, dtype=torch.double),
+            torch.zeros(self.n_params, dtype=torch.double),
+            torch.ones(self.n_params, dtype=torch.double),
         ])
         return unit_bounds
 
@@ -388,9 +381,7 @@ class BayesianOptimizer(Optimizer):
         """
 
         #  generate LHS samples
-        if self.user_seed is not None:
-            # set the random seed for reproducibility
-            seed = self.user_seed
+        seed = self.user_seed if self.user_seed >= 0 else randint(0, 42)
         sampler = LatinHypercube(
             d=self.n_params, seed=seed
         )  # LHS sampler with fixed/None seed
@@ -449,6 +440,7 @@ class BayesianOptimizer(Optimizer):
 
         return x
 
+
 register_algorithm(
     "bayesian",
     display_name="Bayesian optimization",
@@ -489,24 +481,6 @@ register_algorithm(
             step=1,
             tooltip="Number of repeats/shots per sample.",
         ),
-        AlgorithmParameter(
-            name="n_points",
-            label="n_points",
-            minimum=2,
-            maximum=5,
-            default=3,
-            step=1,
-            tooltip="Number of points to explore.",
-        ),
-        # AlgorithmParameter(
-        #     name="acq_func_type",
-        #     label="n_points",
-        #     minimum=2,
-        #     maximum=5,
-        #     default="logEI",
-        #     step=1,
-        #     tooltip="acquisition function type",
-        # ),
         AlgorithmParameter(
             name="user_seed",
             label="user_seed",

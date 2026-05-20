@@ -102,7 +102,6 @@ def _make_bayesian_optimizer(
         fatol=fatol,
         n_init=10,
         m_samples=3,
-        n_points=1,
         user_seed=42,
     )
 
