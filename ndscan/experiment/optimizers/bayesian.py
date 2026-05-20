@@ -175,7 +175,7 @@ class BayesianOptimizer(Optimizer):
         # convert to torch tensors and append the data set with the new point(s)
         self.init_y = torch.cat((
             self.init_y,
-            torch.tensor(-value).reshape(1, 1),
+            torch.tensor(value).reshape(1, 1),
         ))  # update y-values
         self.init_y_var = torch.cat((
             self.init_y_var,
