@@ -55,7 +55,8 @@ class MergeNdscanParamsTest(unittest.TestCase):
             "scan": {"num_repeats": 1},
             "optimise": {
                 "objective": {"channel": "", "direction": "min"},
-                "algorithm": {"kind": "nelder_mead", "max_evals": 100},
+                "algorithm": {"kind": "nelder_mead"},
+                "max_evals": 100,
             },
             "overrides": {},
         }
@@ -73,10 +74,10 @@ class MergeNdscanParamsTest(unittest.TestCase):
                 "objective": {"channel": "", "direction": "min"},
                 "algorithm": {
                     "kind": "nelder_mead",
-                    "max_evals": 100,
                     "xatol": 1e-3,
                     "fatol": 1e-3,
                 },
+                "max_evals": 100,
             },
             "overrides": {},
         }
@@ -85,7 +86,7 @@ class MergeNdscanParamsTest(unittest.TestCase):
             "scan": {"num_repeats": 3},
             "optimise": {
                 "objective": {"channel": "channel_result"},
-                "algorithm": {"max_evals": 500},
+                "max_evals": 500,
             },
         }
 
@@ -102,8 +103,8 @@ class MergeNdscanParamsTest(unittest.TestCase):
             merged["optimise"]["algorithm"],
             {
                 "kind": "nelder_mead",
-                "max_evals": 500,
                 "xatol": 1e-3,
                 "fatol": 1e-3,
             },
         )
+        self.assertEqual(merged["optimise"]["max_evals"], 500)

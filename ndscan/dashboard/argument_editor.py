@@ -117,6 +117,10 @@ class ScanOptions:
         current_scan = current_params.get("scan", {})
         current_optimise = current_params.get("optimise", {})
 
+        # Mapping between display names and averaging method values
+        self._averaging_method_map = {"Mean": "mean", "Median": "median"}
+        self._averaging_method_reverse_map = {v: k for k, v in self._averaging_method_map.items()}
+
         self.execution_mode_container = QtWidgets.QWidget()
         execution_mode_layout = QtWidgets.QHBoxLayout()
         execution_mode_layout.setContentsMargins(5, 5, 5, 5)
@@ -350,21 +354,12 @@ class ScanOptions:
                 param_row_layout.addWidget(label)
 
                 # Create appropriate input widget
-                if param.name == "max_evals":
-                    widget = QtWidgets.QSpinBox()
-                    widget.setMinimum(int(param.minimum))
-                    widget.setMaximum(int(param.maximum))
-                    widget.setValue(
-                        int(current_algorithm.get(param.name, param.default))
-                    )
-                    # widget.setMinimumWidth(widget.minimumSizeHint().width())
-                else:
-                    widget = _make_algorithm_value_box(
-                        param.minimum,
-                        param.maximum,
-                        current_algorithm.get(param.name, param.default),
-                        step=param.step,
-                    )
+                widget = _make_algorithm_value_box(
+                    param.minimum,
+                    param.maximum,
+                    current_algorithm.get(param.name, param.default),
+                    step=param.step,
+                )
 
                 widget.setToolTip(param.tooltip)
                 param_row_layout.addWidget(widget)
@@ -401,16 +396,29 @@ class ScanOptions:
         averaging_label = QtWidgets.QLabel("Averaging:")
         optimise_acquisition_layout.addWidget(averaging_label)
         self.optimise_averaging_method_box = QtWidgets.QComboBox()
-        self.optimise_averaging_method_box.addItems(["Mean", "Median"])
+        self.optimise_averaging_method_box.addItems(self._averaging_method_map.keys())
         self.optimise_averaging_method_box.setToolTip(
             "How repeated objective measurements are combined before updating the optimiser."
         )
         self.optimise_averaging_method_box.setCurrentText(
-            "Median"
-            if current_optimise.get("averaging_method", "mean") == "median"
-            else "Mean"
+            self._averaging_method_reverse_map.get(
+                current_optimise.get("averaging_method", "mean"), "Mean"
+            )
         )
         optimise_acquisition_layout.addWidget(self.optimise_averaging_method_box)
+
+        max_evals_label = QtWidgets.QLabel("Max evals:")
+        optimise_acquisition_layout.addWidget(max_evals_label)
+        self.optimise_max_evals_box = QtWidgets.QSpinBox()
+        self.optimise_max_evals_box.setMinimum(1)
+        self.optimise_max_evals_box.setMaximum(10**7)
+        self.optimise_max_evals_box.setToolTip(
+            "Maximum number of objective evaluations before stopping."
+        )
+        self.optimise_max_evals_box.setValue(
+            current_optimise.get("max_evals", 1000)
+        )
+        optimise_acquisition_layout.addWidget(self.optimise_max_evals_box)
         optimise_acquisition_layout.addStretch()
 
         self.optimise_skip_persistently_failing_container = QtWidgets.QWidget()
@@ -444,6 +452,7 @@ class ScanOptions:
             self.algorithm_box,
             self.optimise_num_repeats_per_point_box,
             self.optimise_averaging_method_box,
+            self.optimise_max_evals_box,
             self.optimise_skip_persistently_failing_box,
         ]:
             try:
@@ -600,10 +609,11 @@ class ScanOptions:
             self.optimise_num_repeats_per_point_box.value()
         )
         optimise["averaging_method"] = (
-            "median"
-            if self.optimise_averaging_method_box.currentText() == "Median"
-            else "mean"
+            self._averaging_method_map.get(
+                self.optimise_averaging_method_box.currentText(), "mean"
+            )
         )
+        optimise["max_evals"] = self.optimise_max_evals_box.value()
         optimise["skip_on_persistent_transitory_error"] = (
             self.optimise_skip_persistently_failing_box.isChecked()
         )
@@ -1243,10 +1253,12 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             "objective": {"channel": "", "direction": "min"},
             "algorithm": {
                 "kind": "nelder_mead",
-                "max_evals": 100,
                 "xatol": 1e-3,
                 "fatol": 1e-3,
             },
+            "num_repeats_per_point": 1,
+            "averaging_method": "mean",
+            "max_evals": 1000,
             "skip_on_persistent_transitory_error": False,
         }
         self._ndscan_params["overrides"] = {}

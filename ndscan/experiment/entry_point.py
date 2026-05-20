@@ -56,7 +56,6 @@ from .optimize import (
     OptimizeSpec,
     build_algorithm_spec,
     describe_optimise,
-    minimum_optimizer_evaluations,
 )
 from .parameters import ParamBase, ParamStore
 from .result_channels import (
@@ -272,12 +271,12 @@ class ArgumentInterface(HasEnvironment):
                 "objective": {"channel": "", "direction": "min"},
                 "algorithm": {
                     "kind": "nelder_mead",
-                    "max_evals": 100,
                     "xatol": 1e-3,
                     "fatol": 1e-3,
                 },
                 "num_repeats_per_point": 1,
                 "averaging_method": "mean",
+                "max_evals": 100,
                 "skip_on_persistent_transitory_error": False,
             }
         self._params = merge_ndscan_params(
@@ -408,14 +407,15 @@ class ArgumentInterface(HasEnvironment):
         algorithm = optimise.get("algorithm", {})
         num_repeats_per_point = int(optimise.get("num_repeats_per_point", 1))
         averaging_method = optimise.get("averaging_method", "mean")
+        max_evals = int(optimise.get("max_evals", 1000))
         if num_repeats_per_point < 1:
-            raise ScanSpecError(
-                "Optimisation num_repeats_per_point must be positive"
-            )
+            raise ScanSpecError("Optimisation num_repeats_per_point must be positive")
         if averaging_method not in {"mean", "median"}:
             raise ScanSpecError(
                 "Optimisation averaging_method must be 'mean' or 'median'"
             )
+        if max_evals < 1:
+            raise ScanSpecError("Optimisation max_evals must be positive")
         try:
             algorithm_spec = build_algorithm_spec(algorithm)
         except ValueError as error:
@@ -427,14 +427,16 @@ class ArgumentInterface(HasEnvironment):
                 objective.get("direction", "min"),
             ),
             algorithm_spec,
-            OptimizeAcquisitionSpec(num_repeats_per_point, averaging_method),
+            OptimizeAcquisitionSpec(num_repeats_per_point, averaging_method, max_evals),
         )
         return spec, optimise.get("skip_on_persistent_transitory_error", False)
 
     def make_execution_spec(
         self,
     ) -> tuple[ExecutionMode, ScanSpec | OptimizeSpec, NoAxesMode, bool]:
-        mode = ExecutionMode[self._params.get("execution_mode", ExecutionMode.scan.name)]
+        mode = ExecutionMode[
+            self._params.get("execution_mode", ExecutionMode.scan.name)
+        ]
         if mode == ExecutionMode.optimise:
             spec, skip = self.make_optimise_spec()
             return mode, spec, NoAxesMode.single, skip
@@ -542,21 +544,9 @@ class TopLevelRunner(HasEnvironment):
                 raise ScanSpecError(
                     "Optimisation objective direction must be 'min' or 'max'"
                 )
-            try:
-                min_evals = minimum_optimizer_evaluations(
-                    self.spec.algorithm.kind, len(self.spec.axes)
-                )
-            except ValueError as exc:
-                raise ScanSpecError(
-                    str(exc)
-                )
             if not self.spec.axes:
                 raise ScanSpecError("Optimisation requires at least one parameter")
-            if self.spec.algorithm.max_evals < min_evals:
-                raise ScanSpecError(
-                    "Optimisation max_evals must be at least "
-                    f"{min_evals} for {len(self.spec.axes)} parameters"
-                )
+
 
         # Filter analyses, set up analysis result channels, and keep track of all the
         # names in the annotation context.
@@ -786,9 +776,14 @@ class TopLevelRunner(HasEnvironment):
                 self.dataset_prefix + "point_phase", self._point_phase, broadcast=True
             )
 
-    def _update_optimizer_best(self, point: tuple[float, ...], value: float):
+    def _update_optimizer_best(
+        self, point: tuple[float, ...], value: float, std_dev: float
+    ):
         self.set_dataset(
             self.dataset_prefix + "optimizer.best_value", value, broadcast=True
+        )
+        self.set_dataset(
+            self.dataset_prefix + "optimizer.best_std", std_dev, broadcast=True
         )
         for i, axis_value in enumerate(point):
             self.set_dataset(
@@ -804,9 +799,21 @@ class TopLevelRunner(HasEnvironment):
             reason,
             broadcast=True,
         )
-        best_value = self.get_dataset(self.dataset_prefix + "optimizer.best_value", default=None)
-        best_point = tuple(self.get_dataset(self.dataset_prefix + f"optimizer.best_axis_{i}", default=None) for i in range(len(self.spec.axes)))
-        logger.info(f"Optimizer terminated with reason: {reason}: point: {best_point}, value: {best_value}")
+        best_value = self.get_dataset(
+            self.dataset_prefix + "optimizer.best_value", default=None
+        )
+        best_std = self.get_dataset(
+            self.dataset_prefix + "optimizer.best_std", default=None
+        )
+        best_point = tuple(
+            self.get_dataset(
+                self.dataset_prefix + f"optimizer.best_axis_{i}", default=None
+            )
+            for i in range(len(self.spec.axes))
+        )
+        logger.info(
+            f"Optimizer terminated with reason: {reason}: point: {best_point}, value: {best_value}, std_dev: {best_std}"
+        )
 
     def _set_completed(self):
         self.set_dataset(self.dataset_prefix + "completed", True, broadcast=True)
@@ -830,7 +837,7 @@ class TopLevelRunner(HasEnvironment):
             push("optimizer.kind", self.spec.algorithm.kind)
             push("optimizer.objective_channel", self.spec.objective.channel)
             push("optimizer.objective_direction", self.spec.objective.direction)
-            push("optimizer.max_evals", self.spec.algorithm.max_evals)
+            push("optimizer.max_evals", self.spec.acquisition.max_evals)
             push("optimizer.xatol", self.spec.algorithm.xatol)
             push("optimizer.fatol", self.spec.algorithm.fatol)
             push(

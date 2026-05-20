@@ -20,6 +20,9 @@ dependencies = [
     "pyqtgraph>=0.13.3",
     "qasync>=0.27.1",
     "sipyco",
+    "torch",
+    "gpytorch",
+    "botorch",
 ]
 
 [project.scripts]

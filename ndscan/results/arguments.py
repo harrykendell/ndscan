@@ -120,7 +120,7 @@ def dump_optimise(schema: dict[str, Any]) -> Iterable[str]:
 
     algorithm = optimise.get("algorithm", {})
     yield f" - Algorithm: {algorithm.get('kind', 'nelder_mead')}"
-    yield f" - Max evaluations: {algorithm.get('max_evals', 100)}"
+    yield f" - Max evaluations: {optimise.get('max_evals', 100)}"
     yield f" - xatol (fraction of span): {algorithm.get('xatol', 1e-3)}"
     yield f" - fatol: {algorithm.get('fatol', 1e-3)}"
     yield (

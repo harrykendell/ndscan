@@ -22,6 +22,9 @@
           h5py
           scipy
           statsmodels
+          torch
+          gpytorch
+          botorch
           nixpkgs.python3Packages.poetry-core
           nixpkgs.python3Packages.poetry-dynamic-versioning
         ];

@@ -140,17 +140,15 @@ class TestSmorgasbordKernelCase(KernelEmulatorCase):
             return f"{fragment_fqn}.{name}"
 
         for scan_def in scan_defs:
-            exp.args._params["scan"]["axes"].append(
-                {
-                    "fqn": fqn(scan_def.param_name),
-                    "path": "*",
-                    "type": "list",
-                    "range": {
-                        "values": scan_def.schema_values,
-                        "randomise_order": True,
-                    },
-                }
-            )
+            exp.args._params["scan"]["axes"].append({
+                "fqn": fqn(scan_def.param_name),
+                "path": "*",
+                "type": "list",
+                "range": {
+                    "values": scan_def.schema_values,
+                    "randomise_order": True,
+                },
+            })
         exp.prepare()
         exp.run()
 
@@ -179,29 +177,25 @@ class TestSmorgasbordKernelCase(KernelEmulatorCase):
 
 class OneTrivial(AggregateExpFragment):
     def build_fragment(self):
-        return super().build_fragment(
-            [self.setattr_fragment("a", TrivialKernelFragment)]
-        )
+        return super().build_fragment([
+            self.setattr_fragment("a", TrivialKernelFragment)
+        ])
 
 
 class TwoTrivial(AggregateExpFragment):
     def build_fragment(self):
-        return super().build_fragment(
-            [
-                self.setattr_fragment("a", TrivialKernelFragment),
-                self.setattr_fragment("b", TrivialKernelFragment),
-            ]
-        )
+        return super().build_fragment([
+            self.setattr_fragment("a", TrivialKernelFragment),
+            self.setattr_fragment("b", TrivialKernelFragment),
+        ])
 
 
 class TwoPlusOneTrivial(AggregateExpFragment):
     def build_fragment(self):
-        return super().build_fragment(
-            [
-                self.setattr_fragment("a", TwoTrivial),
-                self.setattr_fragment("b", OneTrivial),
-            ]
-        )
+        return super().build_fragment([
+            self.setattr_fragment("a", TwoTrivial),
+            self.setattr_fragment("b", OneTrivial),
+        ])
 
 
 TwoPlusOneTrivialScan = make_fragment_scan_exp(TwoPlusOneTrivial)
@@ -490,19 +484,17 @@ class KernelAddOneFragmentSubscan(SubscanExpFragment):
     @rpc(flags={"async"})
     def configure_scan(self):
         if self.num_scan_points.changed_after_use():
-            self.configure(
-                [
-                    (
-                        self.add_one.value,
-                        LinearGenerator(
-                            0.0,
-                            1.0,
-                            num_points=self.num_scan_points.use(),
-                            randomise_order=True,
-                        ),
-                    )
-                ]
-            )
+            self.configure([
+                (
+                    self.add_one.value,
+                    LinearGenerator(
+                        0.0,
+                        1.0,
+                        num_points=self.num_scan_points.use(),
+                        randomise_order=True,
+                    ),
+                )
+            ])
 
     def host_setup(self):
         # Run at least once before kernel starts such that all the fields
@@ -527,17 +519,15 @@ class TestLifetimeCountsCase(KernelEmulatorCase):
         values = [0.0, 1.0, 2.0]
         fragment_fqn = "test_experiment_kernel.KernelAddOneFragment"
 
-        exp.args._params["scan"]["axes"].append(
-            {
-                "fqn": f"{fragment_fqn}.value",
-                "path": "*",
-                "type": "list",
-                "range": {
-                    "values": values,
-                    "randomise_order": True,
-                },
-            }
-        )
+        exp.args._params["scan"]["axes"].append({
+            "fqn": f"{fragment_fqn}.value",
+            "path": "*",
+            "type": "list",
+            "range": {
+                "values": values,
+                "randomise_order": True,
+            },
+        })
 
         exp.prepare()
         exp.run()
@@ -569,17 +559,15 @@ class TestLifetimeCountsCase(KernelEmulatorCase):
         fragment_fqn = "test_experiment_kernel.KernelAddOneFragmentSubscan"
 
         num_pointss = [2, 3, 4]
-        exp.args._params["scan"]["axes"].append(
-            {
-                "fqn": f"{fragment_fqn}.num_scan_points",
-                "path": "*",
-                "type": "list",
-                "range": {
-                    "values": num_pointss,
-                    "randomise_order": True,
-                },
-            }
-        )
+        exp.args._params["scan"]["axes"].append({
+            "fqn": f"{fragment_fqn}.num_scan_points",
+            "path": "*",
+            "type": "list",
+            "range": {
+                "values": num_pointss,
+                "randomise_order": True,
+            },
+        })
 
         exp.prepare()
         exp.run()
@@ -789,15 +777,15 @@ class KernelOptimizeCase(KernelEmulatorCase):
                     "min": -5.0,
                     "max": 5.0,
                     "initial": -4.0,
-                }
+                },
             ],
             "objective": {"channel": "objective", "direction": "min"},
             "algorithm": {
                 "kind": "nelder_mead",
-                "max_evals": 120,
                 "xatol": 1e-4,
                 "fatol": 1e-6,
             },
+            "max_evals": 120,
             "skip_on_persistent_transitory_error": False,
         }
         exp.prepare()
@@ -810,6 +798,7 @@ class KernelOptimizeCase(KernelEmulatorCase):
             self.dataset_db.get("ndscan.rid_0.optimizer.best_axis_1"), -0.5, places=2
         )
         self.assertLess(self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 1e-4)
+        self.assertEqual(self.dataset_db.get("ndscan.rid_0.optimizer.best_std"), 0.0)
 
     def test_kernel_fragment_coordinate_search_optimise(self):
         exp = self.create(KernelQuadraticFragmentScan)
@@ -829,15 +818,15 @@ class KernelOptimizeCase(KernelEmulatorCase):
                     "min": -5.0,
                     "max": 5.0,
                     "initial": -4.0,
-                }
+                },
             ],
             "objective": {"channel": "objective", "direction": "min"},
             "algorithm": {
                 "kind": "coordinate_search",
-                "max_evals": 120,
                 "xatol": 1e-4,
                 "fatol": 1e-6,
             },
+            "max_evals": 120,
             "skip_on_persistent_transitory_error": False,
         }
         exp.prepare()
@@ -853,6 +842,7 @@ class KernelOptimizeCase(KernelEmulatorCase):
             self.dataset_db.get("ndscan.rid_0.optimizer.best_axis_1"), -0.5, places=2
         )
         self.assertLess(self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 1e-4)
+        self.assertEqual(self.dataset_db.get("ndscan.rid_0.optimizer.best_std"), 0.0)
 
     def test_kernel_fragment_median_aggregates_repeats_for_optimiser(self):
         exp = self.create(KernelRepeatOutlierFragmentScan)
@@ -870,10 +860,10 @@ class KernelOptimizeCase(KernelEmulatorCase):
             "objective": {"channel": "objective", "direction": "min"},
             "algorithm": {
                 "kind": "coordinate_search",
-                "max_evals": 1,
                 "xatol": 1e-4,
                 "fatol": 1e-6,
             },
+            "max_evals": 1,
             "num_repeats_per_point": 3,
             "averaging_method": "median",
             "skip_on_persistent_transitory_error": False,
@@ -893,4 +883,7 @@ class KernelOptimizeCase(KernelEmulatorCase):
         )
         self.assertAlmostEqual(
             self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 0.0
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_std"), 4.242640687119285
         )

@@ -3,7 +3,11 @@ from mock_environment import HasEnvironmentCase
 
 from ndscan.experiment import *
 from ndscan.experiment.entry_point import ScanSpecError
-from ndscan.experiment.optimize import CoordinateSearchOptimizer, NelderMeadOptimizer
+from ndscan.experiment.optimize import (
+    CoordinateSearchOptimizer,
+    NelderMeadOptimizer,
+    BayesianOptimizer,
+)
 
 
 class QuadraticFragment(ExpFragment):
@@ -87,92 +91,122 @@ def _evaluate_optimizer(opt, objective):
     return num_evals
 
 
-class NelderMeadOptimizerCase(HasEnvironmentCase):
-    def test_converges_1d(self):
-        opt = NelderMeadOptimizer((4.0,), (-5.0,), (5.0,), 100, 1e-4, 1e-6)
-        _evaluate_optimizer(opt, lambda point: (point[0] - 1.25) ** 2)
+def _make_bayesian_optimizer(
+    initial, lower_bounds, upper_bounds, xatol=1e-3, fatol=1e-3
+):
+    return BayesianOptimizer(
+        initial,
+        lower_bounds,
+        upper_bounds,
+        xatol=xatol,
+        fatol=fatol,
+        n_init=10,
+        m_samples=3,
+        n_points=1,
+        user_seed=42,
+    )
 
-        best_point, best_value = opt.best()
-        self.assertAlmostEqual(best_point[0], 1.25, places=2)
-        self.assertLess(best_value, 1e-4)
+
+OPTIMIZER_TEST_CASES = (
+    {
+        "name": "bayesian",
+        "make": _make_bayesian_optimizer,
+        "std_values": (1.0, 2.0),
+        "std_best_value": 2.0,
+        "xatol": 1e-3,
+        "fatol": 1e-3,
+    },
+    {
+        "name": "nelder_mead",
+        "make": NelderMeadOptimizer,
+        "std_values": (1.0, 0.0),
+        "std_best_value": 0.0,
+        "xatol": 1e-2,
+        "fatol": 1e-10,
+    },
+    {
+        "name": "coordinate_search",
+        "make": CoordinateSearchOptimizer,
+        "std_values": (1.0, 0.0),
+        "std_best_value": 0.0,
+        "xatol": 1e-2,
+        "fatol": 0.0,
+    },
+)
+
+MINIMIZING_OPTIMIZER_TEST_CASES = tuple(
+    case for case in OPTIMIZER_TEST_CASES if case["name"] != "bayesian"
+)
+
+
+class OptimizerCase(HasEnvironmentCase):
+    def test_best_std_tracks_best_point(self):
+        for case in OPTIMIZER_TEST_CASES:
+            with self.subTest(optimizer=case["name"]):
+                opt = case["make"]((0.0,), (-5.0,), (5.0,), 1e-4, 1e-6)
+
+                first_point = opt.ask()
+                self.assertIsNotNone(first_point)
+                opt.tell(first_point, case["std_values"][0], 0.125)
+                second_point = opt.ask()
+                self.assertIsNotNone(second_point)
+                opt.tell(second_point, case["std_values"][1], 0.25)
+
+                best_point, best_value = opt.best()
+                self.assertEqual(tuple(best_point), tuple(second_point))
+                self.assertEqual(best_value, case["std_best_value"])
+                self.assertEqual(opt.best_std(), 0.25)
+
+    def test_converges_1d(self):
+        for case in MINIMIZING_OPTIMIZER_TEST_CASES:
+            with self.subTest(optimizer=case["name"]):
+                opt = case["make"]((4.0,), (-5.0,), (5.0,), 1e-4, 1e-6)
+                _evaluate_optimizer(opt, lambda point: (point[0] - 1.25) ** 2)
+
+                best_point, best_value = opt.best()
+                self.assertAlmostEqual(best_point[0], 1.25, places=2)
+                self.assertLess(best_value, 1e-4)
 
     def test_converges_2d(self):
-        opt = NelderMeadOptimizer(
-            (4.0, -4.0), (-5.0, -5.0), (5.0, 5.0), 200, 1e-4, 1e-6
-        )
-        _evaluate_optimizer(
-            opt, lambda point: (point[0] - 1.5) ** 2 + (point[1] + 0.5) ** 2
-        )
+        for case in MINIMIZING_OPTIMIZER_TEST_CASES:
+            with self.subTest(optimizer=case["name"]):
+                opt = case["make"](
+                    (4.0, -4.0), (-5.0, -5.0), (5.0, 5.0), 1e-4, 1e-6
+                )
+                _evaluate_optimizer(
+                    opt, lambda point: (point[0] - 1.5) ** 2 + (point[1] + 0.5) ** 2
+                )
 
-        best_point, best_value = opt.best()
-        self.assertAlmostEqual(best_point[0], 1.5, places=2)
-        self.assertAlmostEqual(best_point[1], -0.5, places=2)
-        self.assertLess(best_value, 1e-4)
-
-    def test_xatol_is_relative_to_bounds(self):
-        def run_scaled(scale):
-            opt = NelderMeadOptimizer(
-                (4.0 * scale,),
-                (-5.0 * scale,),
-                (5.0 * scale,),
-                200,
-                1e-2,
-                1e-10,
-            )
-            num_evals = _evaluate_optimizer(
-                opt,
-                lambda point: ((point[0] - 1.25 * scale) / (10.0 * scale)) ** 2,
-            )
-            return num_evals, opt.best()[0][0]
-
-        small_count, small_best = run_scaled(1.0)
-        large_count, large_best = run_scaled(10.0)
-        self.assertEqual(small_count, large_count)
-        self.assertAlmostEqual(small_best, large_best / 10.0)
-
-
-class CoordinateSearchOptimizerCase(HasEnvironmentCase):
-    def test_converges_1d(self):
-        opt = CoordinateSearchOptimizer((4.0,), (-5.0,), (5.0,), 100, 1e-4, 1e-6)
-        _evaluate_optimizer(opt, lambda point: (point[0] - 1.25) ** 2)
-
-        best_point, best_value = opt.best()
-        self.assertAlmostEqual(best_point[0], 1.25, places=2)
-        self.assertLess(best_value, 1e-4)
-
-    def test_converges_2d(self):
-        opt = CoordinateSearchOptimizer(
-            (4.0, -4.0), (-5.0, -5.0), (5.0, 5.0), 200, 1e-4, 1e-6
-        )
-        _evaluate_optimizer(
-            opt, lambda point: (point[0] - 1.5) ** 2 + (point[1] + 0.5) ** 2
-        )
-
-        best_point, best_value = opt.best()
-        self.assertAlmostEqual(best_point[0], 1.5, places=2)
-        self.assertAlmostEqual(best_point[1], -0.5, places=2)
-        self.assertLess(best_value, 1e-4)
+                best_point, best_value = opt.best()
+                self.assertAlmostEqual(best_point[0], 1.5, places=2)
+                self.assertAlmostEqual(best_point[1], -0.5, places=2)
+                self.assertLess(best_value, 1e-4)
 
     def test_xatol_is_relative_to_bounds(self):
-        def run_scaled(scale):
-            opt = CoordinateSearchOptimizer(
-                (4.0 * scale,),
-                (-5.0 * scale,),
-                (5.0 * scale,),
-                200,
-                1e-2,
-                0.0,
-            )
-            num_evals = _evaluate_optimizer(
-                opt,
-                lambda point: ((point[0] - 1.25 * scale) / (10.0 * scale)) ** 2,
-            )
-            return num_evals, opt.best()[0][0]
+        for case in MINIMIZING_OPTIMIZER_TEST_CASES:
+            with self.subTest(optimizer=case["name"]):
 
-        small_count, small_best = run_scaled(1.0)
-        large_count, large_best = run_scaled(10.0)
-        self.assertEqual(small_count, large_count)
-        self.assertAlmostEqual(small_best, large_best / 10.0)
+                def run_scaled(scale):
+                    opt = case["make"](
+                        (4.0 * scale,),
+                        (-5.0 * scale,),
+                        (5.0 * scale,),
+                        case["xatol"],
+                        case["fatol"],
+                    )
+                    num_evals = _evaluate_optimizer(
+                        opt,
+                        lambda point: (
+                            (point[0] - 1.25 * scale) / (10.0 * scale)
+                        )
+                        ** 2,
+                    )
+                    return num_evals, opt.best()[0][0]
+
+                small_count, small_best = run_scaled(1.0)
+                large_count, large_best = run_scaled(10.0)
+                self.assertEqual(small_count, large_count)
+                self.assertAlmostEqual(small_best, large_best / 10.0)
 
 
 class FragmentOptimizeExpCase(HasEnvironmentCase):
@@ -203,15 +237,15 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
                     "min": -5.0,
                     "max": 5.0,
                     "initial": -4.0,
-                }
+                },
             ],
             "objective": {"channel": channel, "direction": direction},
             "algorithm": {
                 "kind": algorithm,
-                "max_evals": max_evals,
                 "xatol": 1e-4,
                 "fatol": 1e-6,
             },
+            "max_evals": max_evals,
             "num_repeats_per_point": num_repeats_per_point,
             "averaging_method": averaging_method,
             "skip_on_persistent_transitory_error": False,
@@ -301,15 +335,15 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
                     "min": -5.0,
                     "max": 5.0,
                     "initial": -4.0,
-                }
+                },
             ],
             "objective": {"channel": "objective", "direction": "max"},
             "algorithm": {
                 "kind": "nelder_mead",
-                "max_evals": 120,
                 "xatol": 1e-4,
                 "fatol": 1e-6,
             },
+            "max_evals": 120,
             "skip_on_persistent_transitory_error": False,
         }
         exp.prepare()
@@ -341,10 +375,10 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
             "objective": {"channel": "objective", "direction": "min"},
             "algorithm": {
                 "kind": "nelder_mead",
-                "max_evals": 10,
                 "xatol": 1e-3,
                 "fatol": 1e-3,
             },
+            "max_evals": 10,
             "skip_on_persistent_transitory_error": False,
         }
         with self.assertRaises(ScanSpecError):
@@ -366,19 +400,12 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
             "objective": {"channel": "objective", "direction": "min"},
             "algorithm": {
                 "kind": "nelder_mead",
-                "max_evals": 10,
                 "xatol": 1e-3,
                 "fatol": 1e-3,
             },
+            "max_evals": 10,
             "skip_on_persistent_transitory_error": False,
         }
-        with self.assertRaises(ScanSpecError):
-            exp.prepare()
-
-    def test_reject_too_few_evaluations(self):
-        exp = self.create(QuadraticScanExp)
-        self._configure_optimise(exp)
-        exp.args._params["optimise"]["algorithm"]["max_evals"] = 2
         with self.assertRaises(ScanSpecError):
             exp.prepare()
 
@@ -425,10 +452,10 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
             "objective": {"channel": "objective", "direction": "min"},
             "algorithm": {
                 "kind": "coordinate_search",
-                "max_evals": 1,
                 "xatol": 1e-4,
                 "fatol": 1e-6,
             },
+            "max_evals": 1,
             "num_repeats_per_point": 3,
             "averaging_method": "mean",
             "skip_on_persistent_transitory_error": False,
@@ -460,10 +487,10 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
             "objective": {"channel": "objective", "direction": "min"},
             "algorithm": {
                 "kind": "coordinate_search",
-                "max_evals": 1,
                 "xatol": 1e-4,
                 "fatol": 1e-6,
             },
+            "max_evals": 1,
             "num_repeats_per_point": 3,
             "averaging_method": "median",
             "skip_on_persistent_transitory_error": False,

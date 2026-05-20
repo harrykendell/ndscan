@@ -256,18 +256,12 @@ class ScanOptionsCase(DashboardOptionCase):
 
         self._app.processEvents()
 
-        self.assertEqual(
-            options.algorithm_box.mapTo(container, QtCore.QPoint(0, 0)).y(),
-            options.max_evals_box.mapTo(container, QtCore.QPoint(0, 0)).y(),
-        )
-        self.assertIs(
-            options.max_evals_box.parentWidget(), options.algorithm_settings_container
-        )
         self.assertIs(
             options.algorithm_box.parentWidget(), options.algorithm_settings_container
         )
         self.assertIs(
-            options.xatol_box.parentWidget(), options.algorithm_settings_container
+            options.optimise_max_evals_box.parentWidget(),
+            options.optimise_acquisition_container,
         )
 
     def test_optimise_skip_wording_mentions_np_inf_cost(self):
