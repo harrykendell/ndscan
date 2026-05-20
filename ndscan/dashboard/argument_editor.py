@@ -119,7 +119,9 @@ class ScanOptions:
 
         # Mapping between display names and averaging method values
         self._averaging_method_map = {"Mean": "mean", "Median": "median"}
-        self._averaging_method_reverse_map = {v: k for k, v in self._averaging_method_map.items()}
+        self._averaging_method_reverse_map = {
+            v: k for k, v in self._averaging_method_map.items()
+        }
 
         self.execution_mode_container = QtWidgets.QWidget()
         execution_mode_layout = QtWidgets.QHBoxLayout()
@@ -415,9 +417,7 @@ class ScanOptions:
         self.optimise_max_evals_box.setToolTip(
             "Maximum number of objective evaluations before stopping."
         )
-        self.optimise_max_evals_box.setValue(
-            current_optimise.get("max_evals", 1000)
-        )
+        self.optimise_max_evals_box.setValue(current_optimise.get("max_evals", 100))
         optimise_acquisition_layout.addWidget(self.optimise_max_evals_box)
         optimise_acquisition_layout.addStretch()
 
@@ -608,10 +608,8 @@ class ScanOptions:
         optimise["num_repeats_per_point"] = (
             self.optimise_num_repeats_per_point_box.value()
         )
-        optimise["averaging_method"] = (
-            self._averaging_method_map.get(
-                self.optimise_averaging_method_box.currentText(), "mean"
-            )
+        optimise["averaging_method"] = self._averaging_method_map.get(
+            self.optimise_averaging_method_box.currentText(), "mean"
         )
         optimise["max_evals"] = self.optimise_max_evals_box.value()
         optimise["skip_on_persistent_transitory_error"] = (

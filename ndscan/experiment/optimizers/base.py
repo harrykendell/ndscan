@@ -20,7 +20,7 @@ class OptimizeAlgorithmSpec:
 class OptimizeAcquisitionSpec:
     num_repeats_per_point: int = 1
     averaging_method: str = "mean"
-    max_evals: int = 1000
+    max_evals: int = 100
 
 
 @dataclass

@@ -22,7 +22,6 @@ from . import (
     default_analysis,
     entry_point,
     fragment,
-    optimize,
     parameters,
     result_channels,
     scan_generator,
@@ -31,7 +30,6 @@ from . import (
 from .default_analysis import *
 from .entry_point import *
 from .fragment import *
-from .optimize import *
 from .parameters import *
 from .result_channels import *
 from .scan_generator import *
@@ -43,7 +41,6 @@ __all__.extend(artiq.experiment.__all__)
 __all__.extend(default_analysis.__all__)
 __all__.extend(entry_point.__all__)
 __all__.extend(fragment.__all__)
-__all__.extend(optimize.__all__)
 __all__.extend(parameters.__all__)
 __all__.extend(result_channels.__all__)
 __all__.extend(scan_generator.__all__)

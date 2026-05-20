@@ -10,6 +10,8 @@ The two main entry points into the :class:`.ExpFragment` universe are
    :meth:`run_fragment_once` or :meth:`create_and_run_fragment_once`.
 """
 
+from __future__ import annotations
+
 import logging
 import random
 import time
@@ -47,15 +49,6 @@ from .fragment import (
     Fragment,
     RestartKernelTransitoryError,
     TransitoryError,
-)
-from .optimize import (
-    OptimizeAcquisitionSpec,
-    ObjectiveSpec,
-    OptimizeAxis,
-    OptimizeRunner,
-    OptimizeSpec,
-    build_algorithm_spec,
-    describe_optimise,
 )
 from .parameters import ParamBase, ParamStore
 from .result_channels import (
@@ -370,6 +363,14 @@ class ArgumentInterface(HasEnvironment):
         return spec, no_axes_mode, skip_on_persistent_transitory_error
 
     def make_optimise_spec(self) -> tuple[OptimizeSpec, bool]:
+        from .optimize import (
+            OptimizeAcquisitionSpec,
+            ObjectiveSpec,
+            OptimizeAxis,
+            OptimizeSpec,
+            build_algorithm_spec,
+        )
+
         optimise = self._params.get("optimise", {})
 
         axes = []
@@ -612,6 +613,8 @@ class TopLevelRunner(HasEnvironment):
                 runner.run(self.fragment, self.spec, self._coordinate_sinks)
                 self._set_completed()
         else:
+            from .optimize import OptimizeRunner
+
             runner = OptimizeRunner(
                 self,
                 max_rtio_underflow_retries=self.max_rtio_underflow_retries,
@@ -831,6 +834,8 @@ class TopLevelRunner(HasEnvironment):
         push("execution_mode", self.execution_mode.name)
 
         if self.execution_mode == ExecutionMode.optimise:
+            from .optimize import describe_optimise
+
             self._scan_desc = describe_optimise(
                 self.spec, self.fragment, self._short_child_channel_names
             )
