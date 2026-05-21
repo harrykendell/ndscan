@@ -2,24 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import traceback
+
 import numpy as np
 import numpy.typing as npt
 
-# import ML libraries
+# import BoTorch ML libraries
 from random import randint
 import torch
-from botorch.acquisition.analytic import LogExpectedImprovement
+
 from botorch.acquisition.monte_carlo import (
     qExpectedImprovement,
     qProbabilityOfImprovement,
     qUpperConfidenceBound,
 )
-from botorch.fit import fit_gpytorch_mll
-from botorch.models import SingleTaskGP
-from botorch.optim import optimize_acqf
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from scipy.stats.qmc import LatinHypercube, scale
+
+# for SAASBO implementation 
+from botorch import fit_fully_bayesian_model_nuts
+from botorch.optim import optimize_acqf
+from botorch.acquisition.logei import qLogExpectedImprovement
+from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+from botorch.models.transforms import Standardize
 
 from .base import (
     AlgorithmParameter,
@@ -29,36 +34,39 @@ from .base import (
 )
 
 
-
 @dataclass
-class BayesianOptimizerOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
+class SAASBayesianOptimizerOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
     xatol: float = 1e-3
     fatol: float = 1e-3
     n_init: int = 50
+    warmup_steps: int = 128
+    thinning: int = 16
     user_seed: int = -1
 
 
-class BayesianOptimizer(Optimizer):
+class SAASBayesianOptimizer():
     """
-    Sequential ask/tell Bayesian Optimization implementation.
+    Sequential ask/tell SAAS Bayesian Optimization implementation.
 
-    Bayesian Optimization is a global optimization technique designed
-    for functions that are expensive, noisy, or lack gradient information.
-    Builds a probabilistic surrogate model (Gaussian Process) of the objective
-    function, and uses an acquisition function maximization to decide the next
-    sampling point. This balances exploration and exploitation, and is suitable
-    for black-box optimization procedures.
+    Sparse Axis-Aligned Subspace Bayesian Optimization (SAASBO)is used for
+    high-dimensional Bayesian optimization. SAASBO uses a hierarchical sparsity 
+    prior consisting of a global shrinkage parameter and inverse lengthscales, 
+    employing a half-Cauchy distribution for these parameters. This allows for 
+    effective optimization in high-dimensional spaces.Further perform inference 
+    in the SAAS model using Hamiltonian Monte Carlo (HMC).
     """
 
     def __init__(
         self,
-        initial: tuple[float, ...],  # initial samples from GUI
-        lower_bounds: tuple[float, ...],  # lower bounds of active params
-        upper_bounds: tuple[float, ...],  # upper bounds of active params
+        initial: tuple[float, ...],         # initial samples from GUI
+        lower_bounds: tuple[float, ...],    # lower bounds of active params
+        upper_bounds: tuple[float, ...],    # upper bounds of active params
         xatol: float,
         fatol: float,
-        n_init: int,  # no.of initial samples to generate
-        user_seed: int,  # user defined seed
+        n_init: int,                        # no.of initial samples to generate
+        warmup_steps: int,                  # no.of warmup steps for HMC
+        thinning: int,                      # thinning factor for HMC samples
+        user_seed: int,                     # user defined seed
     ):
 
         # simulation parameters
@@ -67,18 +75,16 @@ class BayesianOptimizer(Optimizer):
         # select the acquisition function type
         self.acq_func_type = "logEI"
 
-        #    if acq_func_type is None:
-        #        self.acq_func_type = "logEI"
-        #    else:
-        #        self.acq_func_type = acq_func_type
-
-        self.user_seed = user_seed  # initial seed for reproducibility
-        self.iter_idx = 0  # initial iteration index
-        self.sample_idx = 0  # sample index
-        self._termination_reason: str | None = None  # termination reason
+        self.user_seed = user_seed                      # for reproducibility
+        self.warmup_steps = warmup_steps
+        self.thinning = thinning
+        self.iter_idx = 0                               # initial iteration index
+        self.sample_idx = 0                             # sample index
+        self._termination_reason: str | None = None     # termination reason
+        self.num_mcmc_samples = 64
 
         # experimental info
-        self.n_params = len(initial)  # no.of active parameters
+        self.n_params = len(initial)                    # no.of active parameters
         self.active_bounds_lower = np.array(lower_bounds, dtype=float)
         self.active_bounds_upper = np.array(upper_bounds, dtype=float)
         self._span = self.active_bounds_upper - self.active_bounds_lower
@@ -234,10 +240,10 @@ class BayesianOptimizer(Optimizer):
         # find where the best values occurred
         best_x, best_y = self.best() # in physical units
 
-        # denormalize init_x and flatten init_y
+        # denormalize init_x and flatten init_y 
         all_x_phys = np.array([self.denormalize(self.init_x[i]) for i in range(len(self.init_x))])
         all_y = self.init_y.numpy().flatten()
-        
+
         # get recent 5 points and values for convergence check
         recent_x = all_x_phys[-5:]
         recent_y = all_y[-5:]
@@ -254,19 +260,6 @@ class BayesianOptimizer(Optimizer):
         if max_x_delta <= self._xatol and max_f_delta <= self._fatol:
             self._termination_reason = "converged"
 
-    def get_kernel(self):
-        """
-        Defines a Matern kernel within a ScaleKernel wrapper.
-
-        Outputs:
-            - covar_module : learned output variance
-        """
-        matern_kernel = MaternKernel(nu=2.5, ard_num_dims=self.init_x.shape[-1])
-
-        # obtain output variance
-        covar_module = ScaleKernel(matern_kernel)
-
-        return covar_module
 
     def build_surrogate_model(self):
         """
@@ -275,23 +268,17 @@ class BayesianOptimizer(Optimizer):
 
         Outputs :
             - model : the surrogate model (GP) fitted to the initial data
-            - mll : the marginal log likelihood of the fitted model
         """
-        # obtain Matern Kernel
-        covar_module = self.get_kernel()
 
         # create GP surrogate
-        model = SingleTaskGP(
+        model = SaasFullyBayesianSingleTaskGP(
             train_X=self.init_x,
             train_Y=self.init_y,
             train_Yvar=self.init_y_var,
-            covar_module=covar_module,
+            outcome_transform=Standardize(m=1)
         )
 
-        # define the marginal log likelihood
-        mll = ExactMarginalLogLikelihood(model.likelihood, model)
-
-        return model, mll
+        return model
 
     def get_acquisition_function(self, model):
         """
@@ -308,7 +295,7 @@ class BayesianOptimizer(Optimizer):
         if self.acq_func_type == "EI":
             acq_func = qExpectedImprovement(model=model, best_f=self.best_init_y)
         elif self.acq_func_type == "logEI":
-            acq_func = LogExpectedImprovement(model=model, best_f=self.best_init_y)
+            acq_func = qLogExpectedImprovement(model=model, best_f=self.best_init_y)
         elif self.acq_func_type == "UCB":
             acq_func = qUpperConfidenceBound(model=model, beta=0.05)
         elif self.acq_func_type == "PI":
@@ -316,25 +303,34 @@ class BayesianOptimizer(Optimizer):
         else:
             raise ValueError("Invalid acquisition function type")
         return acq_func
-
+    
+  
     def get_next_points(self):
         """
         Obtains the next point(s) to sample in the BO loop.
         It does the following:
-            - Builds and trains the surrogate model (GP)
+            - Builds the surrogate model (GP)
+            - Uses fully Bayesian inference for fitting
             - Creates the Acquistion Function (AF)
+            - Safely fit a model 
             - Find candidates for the next point to sample by optimizing the AF.
 
         Outputs :
+            - fit_success: boolean indicating whether the model was fitted successfully
             - candidates: candidate(s) found while using a given AF
         """
         # create the GP models
-        model, mll = self.build_surrogate_model()
+        model = self.build_surrogate_model()
 
         try: # Attempt to fit the model for hyperparameter optimization
-
-            fit_gpytorch_mll(mll)  # uses an Adam optimizer
-            
+            # sample posterior hyperparameters directly via HMC/NUTS.
+            fit_fully_bayesian_model_nuts( 
+                    model,
+                    warmup_steps=self.warmup_steps,
+                    num_samples=self.num_mcmc_samples,
+                    thinning=self.thinning,
+                    disable_progbar=True,
+                ) 
             # create the acquisition function
             acq_func = self.get_acquisition_function(model)
 
@@ -360,7 +356,6 @@ class BayesianOptimizer(Optimizer):
             traceback.print_exc()
             return False, None
 
-    
 
     def make_physical_bounds(self):
         """Function returns the physical bounds for
@@ -461,10 +456,11 @@ class BayesianOptimizer(Optimizer):
         return x
 
 
+
 register_algorithm(
-    "bayesian",
-    display_name="Bayesian optimization",
-    description="Bayesian optimization optimizer",
+    "saas_bayesian",
+    display_name="SAAS Bayesian optimization",
+    description="SAAS Bayesian optimization optimizer",
     parameters=[
         AlgorithmParameter(
             name="fatol",
@@ -486,11 +482,30 @@ register_algorithm(
         AlgorithmParameter(
             name="n_init",
             label="n_init",
-            minimum=10,
+            minimum=20,
             maximum=100,
             default=50,
             step=1,
             tooltip="Number of initial samples to train the GP.",
+        ),
+        
+         AlgorithmParameter(
+            name="warmup_steps",
+            label="warmup_steps",
+            minimum=64,
+            maximum=512,
+            default=100,
+            step=10,
+            tooltip="Number of warmup steps for HMC.",
+        ),
+         AlgorithmParameter(
+            name="thinning",
+            label="thinning",
+            minimum=4,
+            maximum=20,
+            default=16,
+            step=1,
+            tooltip="Thinning factor for HMC samples.",
         ),
         AlgorithmParameter(
             name="user_seed",
@@ -502,11 +517,11 @@ register_algorithm(
             tooltip="User defined seed for initial sampling. If -1, do random selection.",
         ),
     ],
-    spec_cls=BayesianOptimizerOptimizeAlgorithmSpec,
-    optimizer_cls=BayesianOptimizer,
+    spec_cls=SAASBayesianOptimizerOptimizeAlgorithmSpec,
+    optimizer_cls=SAASBayesianOptimizer,
 )
 
 __all__ = [
-    "BayesianOptimizerOptimizeAlgorithmSpec",
-    "BayesianOptimizer",
+    "SAASBayesianOptimizerOptimizeAlgorithmSpec",
+    "SAASBayesianOptimizer",
 ]

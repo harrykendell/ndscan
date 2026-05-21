@@ -7,7 +7,9 @@ from ndscan.experiment.optimize import (
     CoordinateSearchOptimizer,
     NelderMeadOptimizer,
     BayesianOptimizer,
+    SAASBayesianOptimizer
 )
+from ndscan.ndscan.experiment.optimizers.saasbo import SAASBayesianOptimizer
 
 
 class QuadraticFragment(ExpFragment):
@@ -101,7 +103,21 @@ def _make_bayesian_optimizer(
         xatol=xatol,
         fatol=fatol,
         n_init=10,
-        m_samples=3,
+        user_seed=42,
+    )
+
+def _make_saasbayesian_optimizer(
+    initial, lower_bounds, upper_bounds, xatol=1e-3, fatol=1e-3
+):
+    return SAASBayesianOptimizer(
+        initial,
+        lower_bounds,
+        upper_bounds,
+        xatol=xatol,
+        fatol=fatol,
+        n_init=10,
+        warmup_steps=5,
+        thinning=10,
         user_seed=42,
     )
 
@@ -110,6 +126,14 @@ OPTIMIZER_TEST_CASES = (
     {
         "name": "bayesian",
         "make": _make_bayesian_optimizer,
+        "std_values": (1.0, 2.0),
+        "std_best_value": 2.0,
+        "xatol": 1e-3,
+        "fatol": 1e-3,
+    },
+    {
+        "name": "saasbayesian",
+        "make": _make_saasbayesian_optimizer,
         "std_values": (1.0, 2.0),
         "std_best_value": 2.0,
         "xatol": 1e-3,
@@ -130,11 +154,12 @@ OPTIMIZER_TEST_CASES = (
         "std_best_value": 0.0,
         "xatol": 1e-2,
         "fatol": 0.0,
-    },
+    }
+    
 )
 
 MINIMIZING_OPTIMIZER_TEST_CASES = tuple(
-    case for case in OPTIMIZER_TEST_CASES if case["name"] != "bayesian"
+    case for case in OPTIMIZER_TEST_CASES if case["name"] != "bayesian" or case["name"] != "saasbayesian"
 )
 
 

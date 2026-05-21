@@ -17,12 +17,14 @@ from .coordinate_search import (
 )
 from .bayesian import BayesianOptimizerOptimizeAlgorithmSpec, BayesianOptimizer
 from .nelder_mead import NelderMeadOptimizeAlgorithmSpec, NelderMeadOptimizer
-
+from .saasbo import SAASBayesianOptimizerOptimizeAlgorithmSpec, SAASBayesianOptimizer
 __all__ = [
     "ALGORITHM_REGISTRY",
     "AlgorithmParameter",
     "BayesianOptimizerOptimizeAlgorithmSpec",
     "BayesianOptimizer",
+    "SAASBayesianOptimizerOptimizeAlgorithmSpec",
+    "SAASBayesianOptimizer",
     "CoordinateSearchOptimizeAlgorithmSpec",
     "CoordinateSearchOptimizer",
     "NelderMeadOptimizeAlgorithmSpec",
