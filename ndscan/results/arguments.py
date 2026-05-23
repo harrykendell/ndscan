@@ -135,9 +135,14 @@ def dump_optimise(schema: dict[str, Any]) -> Iterable[str]:
         " - Repeats per optimiser point: "
         + str(optimise.get("num_repeats_per_point", 1))
     )
+    yield (" - Averaging method: " + str(optimise.get("averaging_method", "mean")))
     yield (
-        " - Averaging method: "
-        + str(optimise.get("averaging_method", "mean"))
+        " - Reference normalisation: "
+        + str(optimise.get("reference_normalisation", "none"))
+    )
+    yield (
+        " - Reference resample interval: "
+        + str(optimise.get("reference_resample_interval", 1))
     )
     yield (
         " - Give point np.inf cost if transitory errors persist: "
