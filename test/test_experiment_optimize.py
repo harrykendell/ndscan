@@ -76,11 +76,35 @@ class RepeatOutlierFragment(ExpFragment):
         self.run_counter += 1
 
 
+class AdditiveDriftFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("objective", FloatChannel)
+        self.run_counter = 0
+
+    def run_once(self):
+        self.objective.push(self.x.get() + 10.0 * self.run_counter)
+        self.run_counter += 1
+
+
+class MultiplicativeDriftFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("objective", FloatChannel)
+        self.run_counter = 0
+
+    def run_once(self):
+        self.objective.push((self.x.get() + 2.0) * (self.run_counter + 1.0))
+        self.run_counter += 1
+
+
 QuadraticScanExp = make_fragment_scan_exp(QuadraticFragment)
 InvertedQuadraticScanExp = make_fragment_scan_exp(InvertedQuadraticFragment)
 OpaqueObjectiveScanExp = make_fragment_scan_exp(OpaqueObjectiveFragment)
 IntAxisScanExp = make_fragment_scan_exp(IntAxisFragment)
 RepeatOutlierScanExp = make_fragment_scan_exp(RepeatOutlierFragment)
+AdditiveDriftScanExp = make_fragment_scan_exp(AdditiveDriftFragment)
+MultiplicativeDriftScanExp = make_fragment_scan_exp(MultiplicativeDriftFragment)
 
 
 def _evaluate_optimizer(opt, objective):
@@ -287,6 +311,8 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         self.assertEqual(d("optimizer.objective_direction"), "min")
         self.assertEqual(d("optimizer.num_repeats_per_point"), 1)
         self.assertEqual(d("optimizer.averaging_method"), "mean")
+        self.assertEqual(d("optimizer.reference_normalisation"), "none")
+        self.assertEqual(d("optimizer.reference_resample_interval"), 1)
         self.assertIn(
             d("optimizer.termination_reason"), {"converged", "max_evals_reached"}
         )
@@ -456,6 +482,96 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         exp.args._params["optimise"]["averaging_method"] = "mode"
         with self.assertRaises(ScanSpecError):
             exp.prepare()
+
+    def test_reject_unknown_reference_normalisation(self):
+        exp = self.create(QuadraticScanExp)
+        self._configure_optimise(exp)
+        exp.args._params["optimise"]["reference_normalisation"] = "bogus"
+        with self.assertRaises(ScanSpecError):
+            exp.prepare()
+
+    def test_reject_non_positive_reference_resample_interval(self):
+        exp = self.create(QuadraticScanExp)
+        self._configure_optimise(exp)
+        exp.args._params["optimise"]["reference_resample_interval"] = 0
+        with self.assertRaises(ScanSpecError):
+            exp.prepare()
+
+    def test_subtract_reference_normalisation(self):
+        exp = self.create(AdditiveDriftScanExp)
+        exp.args._params["execution_mode"] = "optimise"
+        exp.args._params["optimise"] = {
+            "parameters": [
+                {
+                    "fqn": "test_experiment_optimize.AdditiveDriftFragment.x",
+                    "path": "*",
+                    "min": -1.0,
+                    "max": 1.0,
+                    "initial": 0.0,
+                }
+            ],
+            "objective": {"channel": "objective", "direction": "min"},
+            "algorithm": {
+                "kind": "coordinate_search",
+                "xatol": 1e-4,
+                "fatol": 1e-6,
+            },
+            "max_evals": 6,
+            "reference_normalisation": "subtract",
+            "reference_resample_interval": 1,
+            "skip_on_persistent_transitory_error": False,
+        }
+        exp.prepare()
+        exp.run()
+
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.points.channel_objective"),
+            [0.0, 10.0, 20.0, 30.5, 40.0, 49.5],
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_axis_0"), -0.5
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 9.5
+        )
+
+    def test_divide_reference_normalisation(self):
+        exp = self.create(MultiplicativeDriftScanExp)
+        exp.args._params["execution_mode"] = "optimise"
+        exp.args._params["optimise"] = {
+            "parameters": [
+                {
+                    "fqn": "test_experiment_optimize.MultiplicativeDriftFragment.x",
+                    "path": "*",
+                    "min": -1.0,
+                    "max": 1.0,
+                    "initial": 0.0,
+                }
+            ],
+            "objective": {"channel": "objective", "direction": "min"},
+            "algorithm": {
+                "kind": "coordinate_search",
+                "xatol": 1e-4,
+                "fatol": 1e-6,
+            },
+            "max_evals": 6,
+            "reference_normalisation": "divide",
+            "reference_resample_interval": 1,
+            "skip_on_persistent_transitory_error": False,
+        }
+        exp.prepare()
+        exp.run()
+
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.points.channel_objective"),
+            [2.0, 4.0, 6.0, 10.0, 10.0, 9.0],
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_axis_0"), -0.5
+        )
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 0.9
+        )
 
     def test_mean_aggregates_repeated_objective_values(self):
         exp = self.create(RepeatOutlierScanExp)

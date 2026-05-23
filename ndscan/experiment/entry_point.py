@@ -410,6 +410,10 @@ class ArgumentInterface(HasEnvironment):
         num_repeats_per_point = int(optimise.get("num_repeats_per_point", 1))
         averaging_method = optimise.get("averaging_method", "mean")
         max_evals = int(optimise.get("max_evals", 1000))
+        reference_normalisation = optimise.get("reference_normalisation", "none")
+        reference_resample_interval = int(
+            optimise.get("reference_resample_interval", 1)
+        )
         if num_repeats_per_point < 1:
             raise ScanSpecError("Optimisation num_repeats_per_point must be positive")
         if averaging_method not in {"mean", "median"}:
@@ -418,6 +422,15 @@ class ArgumentInterface(HasEnvironment):
             )
         if max_evals < 1:
             raise ScanSpecError("Optimisation max_evals must be positive")
+        if reference_normalisation not in {"none", "subtract", "divide"}:
+            raise ScanSpecError(
+                "Optimisation reference_normalisation must be "
+                "'none', 'subtract', or 'divide'"
+            )
+        if reference_resample_interval < 1:
+            raise ScanSpecError(
+                "Optimisation reference_resample_interval must be positive"
+            )
         try:
             algorithm_spec = build_algorithm_spec(algorithm)
         except ValueError as error:
@@ -429,7 +442,13 @@ class ArgumentInterface(HasEnvironment):
                 objective.get("direction", "min"),
             ),
             algorithm_spec,
-            OptimizeAcquisitionSpec(num_repeats_per_point, averaging_method, max_evals),
+            OptimizeAcquisitionSpec(
+                num_repeats_per_point,
+                averaging_method,
+                max_evals,
+                reference_normalisation,
+                reference_resample_interval,
+            ),
         )
         return spec, optimise.get("skip_on_persistent_transitory_error", False)
 
@@ -887,6 +906,14 @@ class TopLevelRunner(HasEnvironment):
             push(
                 "optimizer.averaging_method",
                 self.spec.acquisition.averaging_method,
+            )
+            push(
+                "optimizer.reference_normalisation",
+                self.spec.acquisition.reference_normalisation,
+            )
+            push(
+                "optimizer.reference_resample_interval",
+                self.spec.acquisition.reference_resample_interval,
             )
         else:
             self._scan_desc = describe_scan(

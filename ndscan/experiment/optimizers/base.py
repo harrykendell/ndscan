@@ -21,6 +21,8 @@ class OptimizeAcquisitionSpec:
     num_repeats_per_point: int = 1
     averaging_method: str = "mean"
     max_evals: int = 100
+    reference_normalisation: str = "none"
+    reference_resample_interval: int = 1
 
 
 @dataclass
