@@ -109,8 +109,33 @@ class OptimizeRunner(HasEnvironment):
 
         repeats_per_point = spec.acquisition.num_repeats_per_point
         max_evals = spec.acquisition.max_evals
+        reference_normalisation = spec.acquisition.reference_normalisation
+        use_reference = reference_normalisation != "none"
+        reference_point = tuple(axis.initial for axis in spec.axes)
+        reference_value: float | None = None
+        reference_std_dev = 0.0
+        candidates_since_reference = 0
+
+        def publish_best() -> None:
+            if on_best_updated is None:
+                return
+            best = optimizer.best()
+            if best is None:
+                return
+            best_point, best_value = best
+            best_std = optimizer.best_std()
+            actual_value = (
+                best_value if spec.objective.direction == "min" else -best_value
+            )
+            on_best_updated(
+                best_point,
+                actual_value,
+                0.0 if best_std is None else best_std,
+            )
+
         num_evals_used = 0
         current_point: tuple[float, ...] | None = None
+        current_point_kind: str | None = None
         current_objective_samples: list[float] = []
         point_loaded = False
         num_points_recorded = 0
@@ -122,9 +147,18 @@ class OptimizeRunner(HasEnvironment):
                     fragment.host_setup()
                     while not optimizer.is_done() and num_evals_used < max_evals:
                         if current_point is None:
-                            current_point = optimizer.ask()
-                            if current_point is None:
-                                break
+                            if use_reference and (
+                                reference_value is None
+                                or candidates_since_reference
+                                >= spec.acquisition.reference_resample_interval
+                            ):
+                                current_point = reference_point
+                                current_point_kind = "reference"
+                            else:
+                                current_point = optimizer.ask()
+                                if current_point is None:
+                                    break
+                                current_point_kind = "candidate"
                             current_objective_samples.clear()
                             point_loaded = False
                         if not point_loaded:
@@ -153,39 +187,52 @@ class OptimizeRunner(HasEnvironment):
                             objective_std_dev = float(
                                 np.std(current_objective_samples[:repeats_per_point])
                             )
-                            transformed = (
-                                objective_value
-                                if spec.objective.direction == "min"
-                                else -objective_value
-                            )
-                            optimizer.tell(
-                                current_point, transformed, objective_std_dev
-                            )
                             num_evals_used += repeats_per_point
-                            if on_best_updated is not None:
-                                best = optimizer.best()
-                                if best is not None:
-                                    best_point, best_value = best
-                                    best_std = optimizer.best_std()
-                                    actual_value = (
-                                        best_value
+
+                            if current_point_kind == "reference":
+                                reference_value = objective_value
+                                reference_std_dev = objective_std_dev
+                                candidates_since_reference = 0
+                            else:
+                                normalised = _normalise_objective_value(
+                                    objective_value,
+                                    objective_std_dev,
+                                    reference_value,
+                                    reference_std_dev,
+                                    reference_normalisation,
+                                )
+                                if normalised is None:
+                                    optimizer.tell(current_point, float("inf"), 0.0)
+                                else:
+                                    objective_value, objective_std_dev = normalised
+                                    transformed = (
+                                        objective_value
                                         if spec.objective.direction == "min"
-                                        else -best_value
+                                        else -objective_value
                                     )
-                                    on_best_updated(
-                                        best_point,
-                                        actual_value,
-                                        0.0 if best_std is None else best_std,
+                                    optimizer.tell(
+                                        current_point,
+                                        transformed,
+                                        objective_std_dev,
                                     )
+                                candidates_since_reference += 1
+                                publish_best()
 
                             current_objective_samples.clear()
                             current_point = None
+                            current_point_kind = None
                             point_loaded = False
                         elif completed:
-                            optimizer.tell(current_point, float("inf"), 0.0)
                             num_evals_used += repeats_per_point
+                            if current_point_kind == "reference":
+                                termination_reason = "reference_measurement_failed"
+                                return
+
+                            optimizer.tell(current_point, float("inf"), 0.0)
+                            candidates_since_reference += 1
                             current_objective_samples.clear()
                             current_point = None
+                            current_point_kind = None
                             point_loaded = False
 
                         if not completed:
@@ -218,6 +265,33 @@ def _aggregate_objective_samples(samples: list[float], method: str) -> float:
     raise ValueError(f"Unsupported optimisation averaging method '{method}'")
 
 
+def _normalise_objective_value(
+    value: float,
+    std_dev: float,
+    reference_value: float | None,
+    reference_std_dev: float,
+    method: str,
+) -> tuple[float, float] | None:
+    if method == "none":
+        return value, std_dev
+    if reference_value is None:
+        return None
+    if method == "subtract":
+        return value - reference_value, float(np.hypot(std_dev, reference_std_dev))
+    if method == "divide":
+        if abs(reference_value) <= np.finfo(float).eps:
+            return None
+        normalised = value / reference_value
+        normalised_std_dev = float(
+            np.hypot(
+                std_dev / reference_value,
+                value * reference_std_dev / reference_value**2,
+            )
+        )
+        return normalised, normalised_std_dev
+    raise ValueError(f"Unsupported reference normalisation method '{method}'")
+
+
 def describe_optimise(
     spec: OptimizeSpec,
     fragment,
@@ -239,6 +313,10 @@ def describe_optimise(
             "num_repeats_per_point": spec.acquisition.num_repeats_per_point,
             "averaging_method": spec.acquisition.averaging_method,
             "max_evals": spec.acquisition.max_evals,
+            "reference_normalisation": spec.acquisition.reference_normalisation,
+            "reference_resample_interval": (
+                spec.acquisition.reference_resample_interval
+            ),
         },
         "objective": {
             "channel": spec.objective.channel,

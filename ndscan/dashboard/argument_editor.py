@@ -122,6 +122,14 @@ class ScanOptions:
         self._averaging_method_reverse_map = {
             v: k for k, v in self._averaging_method_map.items()
         }
+        self._reference_normalisation_map = {
+            "None": "none",
+            "Subtract initial point": "subtract",
+            "Divide by initial point": "divide",
+        }
+        self._reference_normalisation_reverse_map = {
+            v: k for k, v in self._reference_normalisation_map.items()
+        }
 
         self.execution_mode_container = QtWidgets.QWidget()
         execution_mode_layout = QtWidgets.QHBoxLayout()
@@ -421,6 +429,45 @@ class ScanOptions:
         optimise_acquisition_layout.addWidget(self.optimise_max_evals_box)
         optimise_acquisition_layout.addStretch()
 
+        self.optimise_reference_container = QtWidgets.QWidget()
+        optimise_reference_layout = QtWidgets.QHBoxLayout()
+        optimise_reference_layout.setContentsMargins(5, 5, 5, 5)
+        self.optimise_reference_container.setLayout(optimise_reference_layout)
+
+        reference_normalisation_label = QtWidgets.QLabel("Normalisation:")
+        optimise_reference_layout.addWidget(reference_normalisation_label)
+        self.optimise_reference_normalisation_box = QtWidgets.QComboBox()
+        self.optimise_reference_normalisation_box.addItems(
+            self._reference_normalisation_map.keys()
+        )
+        self.optimise_reference_normalisation_box.setToolTip(
+            "Optionally normalise each optimiser point to the periodically "
+            "remeasured initial point."
+        )
+        self.optimise_reference_normalisation_box.setCurrentText(
+            self._reference_normalisation_reverse_map.get(
+                current_optimise.get("reference_normalisation", "none"), "None"
+            )
+        )
+        optimise_reference_layout.addWidget(self.optimise_reference_normalisation_box)
+
+        reference_resample_label = QtWidgets.QLabel("Resample interval:")
+        optimise_reference_layout.addWidget(reference_resample_label)
+        self.optimise_reference_resample_interval_box = QtWidgets.QSpinBox()
+        self.optimise_reference_resample_interval_box.setMinimum(1)
+        self.optimise_reference_resample_interval_box.setMaximum(10**6)
+        self.optimise_reference_resample_interval_box.setToolTip(
+            "How many optimiser candidate points to acquire before remeasuring "
+            "the initial reference point."
+        )
+        self.optimise_reference_resample_interval_box.setValue(
+            current_optimise.get("reference_resample_interval", 1)
+        )
+        optimise_reference_layout.addWidget(
+            self.optimise_reference_resample_interval_box
+        )
+        optimise_reference_layout.addStretch()
+
         self.optimise_skip_persistently_failing_container = QtWidgets.QWidget()
         optimise_skip_layout = QtWidgets.QHBoxLayout()
         optimise_skip_layout.setContentsMargins(5, 5, 5, 5)
@@ -453,6 +500,8 @@ class ScanOptions:
             self.optimise_num_repeats_per_point_box,
             self.optimise_averaging_method_box,
             self.optimise_max_evals_box,
+            self.optimise_reference_normalisation_box,
+            self.optimise_reference_resample_interval_box,
             self.optimise_skip_persistently_failing_box,
         ]:
             try:
@@ -468,8 +517,12 @@ class ScanOptions:
         self.algorithm_box.currentIndexChanged.connect(
             self._update_algorithm_parameters
         )
+        self.optimise_reference_normalisation_box.currentIndexChanged.connect(
+            self._update_reference_normalisation
+        )
 
         self._update_visibility()
+        self._update_reference_normalisation()
 
     def current_mode(self) -> str:
         return ExecutionMode(self.execution_mode_box.currentText()).name
@@ -496,6 +549,8 @@ class ScanOptions:
             self.algorithm_box,
             self.optimise_num_repeats_per_point_box,
             self.optimise_averaging_method_box,
+            self.optimise_reference_normalisation_box,
+            self.optimise_reference_resample_interval_box,
             self.optimise_skip_persistently_failing_box,
         ]:
             try:
@@ -548,6 +603,7 @@ class ScanOptions:
             ),
             ("Objective channel", self.objective_container),
             ("Point acquisition", self.optimise_acquisition_container),
+            ("Reference normalisation", self.optimise_reference_container),
             (
                 "Apply maximally bad objective result if transitory errors persist",
                 self.optimise_skip_persistently_failing_container,
@@ -612,6 +668,12 @@ class ScanOptions:
             self.optimise_averaging_method_box.currentText(), "mean"
         )
         optimise["max_evals"] = self.optimise_max_evals_box.value()
+        optimise["reference_normalisation"] = self._reference_normalisation_map.get(
+            self.optimise_reference_normalisation_box.currentText(), "none"
+        )
+        optimise["reference_resample_interval"] = (
+            self.optimise_reference_resample_interval_box.value()
+        )
         optimise["skip_on_persistent_transitory_error"] = (
             self.optimise_skip_persistently_failing_box.isChecked()
         )
@@ -631,9 +693,16 @@ class ScanOptions:
             self.objective_container,
             self.algorithm_settings_container,
             self.optimise_acquisition_container,
+            self.optimise_reference_container,
             self.optimise_skip_persistently_failing_container,
         ]:
             self._set_row_visible(widget, not is_scan)
+
+    def _update_reference_normalisation(self, *_args):
+        method = self._reference_normalisation_map.get(
+            self.optimise_reference_normalisation_box.currentText(), "none"
+        )
+        self.optimise_reference_resample_interval_box.setEnabled(method != "none")
 
     def _update_algorithm_parameters(self, *_args):
         """Show/hide parameter containers based on selected algorithm."""
@@ -1257,6 +1326,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             "num_repeats_per_point": 1,
             "averaging_method": "mean",
             "max_evals": 1000,
+            "reference_normalisation": "none",
+            "reference_resample_interval": 1,
             "skip_on_persistent_transitory_error": False,
         }
         self._ndscan_params["overrides"] = {}
