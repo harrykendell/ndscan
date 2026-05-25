@@ -112,3 +112,83 @@ class SinglePointTest(unittest.TestCase):
         self.datasets["ndscan.completed"] = (False, True, {})
         self.init()
         self.assertEqual(self.root.get_model().get_point(), {"foo": 42, "bar": 23})
+
+
+class ScanTest(unittest.TestCase):
+    def setUp(self):
+        self.context = Context()
+        self.root = SubscriberRoot("ndscan.", self.context)
+        self.datasets = Notifier(
+            {
+                "ndscan.axes": (
+                    False,
+                    json.dumps(
+                        [
+                            {
+                                "param": {
+                                    "description": "Foo",
+                                    "spec": {"unit": ""},
+                                },
+                                "path": "foo",
+                            },
+                            {
+                                "param": {
+                                    "description": "Bar",
+                                    "spec": {"unit": ""},
+                                },
+                                "path": "bar",
+                            },
+                        ]
+                    ),
+                    {},
+                ),
+                "ndscan.channels": (
+                    False,
+                    json.dumps(
+                        {
+                            "foo": {
+                                "description": "Foo",
+                                "path": "foo",
+                                "type": "float",
+                                "unit": "",
+                            },
+                        }
+                    ),
+                    {},
+                ),
+                "ndscan.online_analyses": (False, "{}", {}),
+                ("ndscan." + SCHEMA_REVISION_KEY): (False, SCHEMA_REVISION, {}),
+            }
+        )
+        self.pending_mods = []
+        self.datasets.publish = lambda a: self.pending_mods.append(a)
+
+    def init(self):
+        self.pending_mods = [
+            {"action": "init", "struct": self.datasets.raw_view.copy()}
+        ]
+        self.sync()
+
+    def sync(self):
+        values = {k: v[1] for k, v in self.datasets.raw_view.items()}
+        self.root.data_changed(values, self.pending_mods)
+        self.pending_mods.clear()
+
+    def test_is_optimising_known_when_model_emitted(self):
+        self.datasets["ndscan.execution_mode"] = (False, "optimise", {})
+        emitted_modes = []
+        self.root.model_changed.connect(
+            lambda model: emitted_modes.append(model.is_optimising())
+        )
+
+        self.init()
+
+        self.assertEqual(emitted_modes, [True])
+        self.assertTrue(self.root.get_model().is_optimising())
+
+    def test_scan_mode_is_not_optimising(self):
+        self.datasets["ndscan.execution_mode"] = (False, "scan", {})
+
+        self.init()
+
+        self.assertFalse(self.root.get_model().is_optimising())
