@@ -6,6 +6,7 @@ import pyqtgraph.dockarea as pgda
 from .._qt import QtCore, QtWidgets
 from .image_2d import Image2DPlotWidget
 from .model import Context, Root, ScanModel, SinglePointModel
+from .optimise_Nd import OptimisePlotWidget
 from .plot_widgets import VerticalPanesWidget
 from .rolling_1d import Rolling1DPlotWidget
 from .xy_1d import XY1DPlotWidget
@@ -17,10 +18,12 @@ def make_plot_for_dimensional_model(model: ScanModel) -> VerticalPanesWidget:
     dim = len(model.axes)
     if dim == 1:
         return XY1DPlotWidget(model)
-    if dim == 2:
+    if model.is_optimising():
+        return OptimisePlotWidget(model)
+    elif dim == 2:
         return Image2DPlotWidget(model)
     raise NotImplementedError(
-        f"Plots for {dim}-dimensional data are not yet implemented"
+        f"Plots for {dim}-dimensional scan data are not yet implemented"
     )
 
 
