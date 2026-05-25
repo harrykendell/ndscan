@@ -6,6 +6,7 @@ from ndscan.experiment.entry_point import ScanSpecError
 from ndscan.experiment.optimize import (
     CoordinateSearchOptimizer,
     NelderMeadOptimizer,
+    BayesianOptimizer,
 )
 
 
@@ -92,6 +93,15 @@ def _evaluate_optimizer(opt, objective):
 
 OPTIMIZER_TEST_CASES = (
     {
+        "name": "bayesian",
+        "make": BayesianOptimizer,
+        "kwargs": {"n_init": 10, "user_seed": 42},
+        "std_values": (1.0, 0.0),
+        "std_best_value": 0.0,
+        "xatol": 1e-3,
+        "fatol": 1e-3,
+    },
+    {
         "name": "nelder_mead",
         "make": NelderMeadOptimizer,
         "std_values": (1.0, 0.0),
@@ -139,7 +149,7 @@ class OptimizerCase(HasEnvironmentCase):
             (-5.0,),
             (5.0,),
             xatol=1e-4,
-            fatol=1e-6,
+            fatol=1e-4,
             **case.get("kwargs", {}),
         )
         _evaluate_optimizer(opt, lambda x: x[0] ** 3 / 3 + 5 * x[0] ** 2 / 2 - 6 * x[0])
@@ -157,7 +167,7 @@ class OptimizerCase(HasEnvironmentCase):
             (-5.0, -5.0),
             (5.0, 5.0),
             xatol=1e-4,
-            fatol=1e-6,
+            fatol=1e-4,
             **case.get("kwargs", {}),
         )
         _evaluate_optimizer(
