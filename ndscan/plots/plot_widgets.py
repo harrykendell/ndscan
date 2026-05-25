@@ -18,6 +18,27 @@ from .model import Context, Root
 logger = logging.getLogger(__name__)
 
 
+class _ViewBoxWheelEvent:
+    def __init__(self, event, view_box):
+        self._event = event
+        pos = view_box.mapFromScene(event.scenePos())
+        if not view_box.boundingRect().contains(pos):
+            pos = view_box.boundingRect().center()
+        self._pos = pos
+
+    def delta(self):
+        return self._event.delta()
+
+    def pos(self):
+        return self._pos
+
+    def accept(self):
+        self._event.accept()
+
+    def ignore(self):
+        self._event.ignore()
+
+
 class MultiYAxisPlotItem(pyqtgraph.PlotItem):
     """Wraps PlotItem with the ability to create multiple y axes linked to the same x
     axis.
@@ -35,6 +56,9 @@ class MultiYAxisPlotItem(pyqtgraph.PlotItem):
         self.getViewBox().setBorder(
             pyqtgraph.functions.mkPen(pyqtgraph.getConfigOption("foreground"))
         )
+
+    def wheelEvent(self, event):
+        self.getViewBox().wheelEvent(_ViewBoxWheelEvent(event, self.getViewBox()))
 
     def new_y_axis(self):
         self._num_y_axes += 1
@@ -509,10 +533,10 @@ def add_source_id_label(
             return self.setPos(xmin, ymin)
 
     text_item = SourceIdTextItem(
-        text="", anchor=(0, 1), color=(255, 255, 255), fill=(0, 0, 0)
+        text="", anchor=(0, 1), color=(0, 0, 0), fill=(255, 255, 255, 220)
     )
     text_item.setZValue(1000)
-    text_item.setOpacity(0.3)
+    text_item.setOpacity(1.0)
     view_box.addItem(text_item, ignoreBounds=True)
 
     context.source_id_changed.connect(text_item.setText)
