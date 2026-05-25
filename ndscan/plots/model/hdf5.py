@@ -81,6 +81,13 @@ class HDF5ScanModel(ScanModel):
         super().__init__(axes, schema_revision, context)
 
         self._channel_schemata = json.loads(datasets[prefix + "channels"][()])
+        execution_mode = datasets.get(prefix + "execution_mode")
+        self._is_optimising = False
+        if execution_mode is not None:
+            execution_mode = execution_mode[()]
+            if isinstance(execution_mode, bytes):
+                execution_mode = execution_mode.decode()
+            self._is_optimising = execution_mode == "optimise"
 
         self._analysis_result_sources = {}
         ark = prefix + "analysis_results"
@@ -108,6 +115,9 @@ class HDF5ScanModel(ScanModel):
 
     def get_point_data(self) -> dict[str, Any]:
         return self._point_data
+
+    def is_optimising(self) -> bool:
+        return self._is_optimising
 
     def get_analysis_result_source(self, name: str) -> FixedDataSource | None:
         if name not in self._analysis_result_sources:

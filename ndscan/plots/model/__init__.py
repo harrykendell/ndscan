@@ -186,6 +186,9 @@ class ScanModel(Model):
     def get_point_data(self) -> dict[str, Any]:
         raise NotImplementedError
 
+    def is_optimising(self) -> bool:
+        return False
+
     def get_annotations(self) -> list[Annotation]:
         return self._annotations
 
