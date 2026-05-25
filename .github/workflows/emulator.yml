@@ -3,6 +3,7 @@ name: core device emulator
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
@@ -11,10 +12,10 @@ jobs:
       id-token: "write"
       contents: "read"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Prepare Nix ARTIQ environment
         run: nix build --accept-flake-config .github/artiq-emulator#devShells.x86_64-linux.default
       - name: Run unit tests with core device emulator
-        run: ARTIQ_ROOT=$GITHUB_WORKSPACE/.github/artiq-emulator nix develop --accept-flake-config .github/artiq-emulator#devShells.x86_64-linux.default --command python -m unittest discover -v test
+        run: ./run_tests.sh
