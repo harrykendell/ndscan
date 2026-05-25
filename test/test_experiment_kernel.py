@@ -450,6 +450,20 @@ class KernelAddOneFragment(ExpFragment):
 KernelAddOneFragmentScan = make_fragment_scan_exp(KernelAddOneFragment)
 
 
+class KernelQuadraticFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", 0.0)
+        self.setattr_param("y", FloatParam, "y", 0.0)
+        self.setattr_result("objective", FloatChannel)
+
+    @kernel
+    def run_once(self):
+        self.objective.push((self.x.get() - 1.25) ** 2 + (self.y.get() + 0.5) ** 2)
+
+
+KernelQuadraticFragmentScan = make_fragment_scan_exp(KernelQuadraticFragment)
+
+
 class KernelAddOneFragmentSubscan(SubscanExpFragment):
     def build_fragment(self):
         self.setattr_fragment("add_one", KernelAddOneFragment)
@@ -738,4 +752,48 @@ class KernelTransitoryErrorSubscanCase(KernelEmulatorCase):
             ConfigureMode.every_host_setup,
             num_run_once_to_restart_fail=2,
             fail_at_point=_fail_every(12),
+        )
+
+
+class KernelOptimizeCase(KernelEmulatorCase):
+    def test_kernel_fragment_optimise_smoke(self):
+        exp = self.create(KernelQuadraticFragmentScan)
+        exp.args._params["execution_mode"] = "optimise"
+        exp.args._params["optimise"] = {
+            "parameters": [
+                {
+                    "fqn": "test_experiment_kernel.KernelQuadraticFragment.x",
+                    "path": "*",
+                    "min": -5.0,
+                    "max": 5.0,
+                    "initial": 4.0,
+                },
+                {
+                    "fqn": "test_experiment_kernel.KernelQuadraticFragment.y",
+                    "path": "*",
+                    "min": -5.0,
+                    "max": 5.0,
+                    "initial": -4.0,
+                },
+            ],
+            "objective": {"channel": "objective", "direction": "min"},
+            "algorithm": {
+                "kind": "nelder_mead",
+                "xatol": 1e-4,
+                "fatol": 1e-6,
+            },
+            "max_evals": 1,
+            "skip_on_persistent_transitory_error": False,
+        }
+        exp.prepare()
+        exp.run()
+
+        self.assertEqual(self.dataset_db.get("ndscan.rid_0.completed"), True)
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.execution_mode"), "optimise"
+        )
+        self.assertEqual(len(self.dataset_db.get("ndscan.rid_0.points.axis_0")), 1)
+        self.assertEqual(len(self.dataset_db.get("ndscan.rid_0.points.axis_1")), 1)
+        self.assertEqual(
+            len(self.dataset_db.get("ndscan.rid_0.points.channel_objective")), 1
         )

@@ -1,20 +1,27 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from collections import Counter, OrderedDict
 from functools import partial
 from typing import Any
 
+from sipyco import pyon
+
 from artiq.gui.entries import procdesc_to_entry
 from artiq.gui.fuzzy_select import FuzzySelectWidget
-from artiq.gui.tools import LayoutWidget, WheelFilter
-from sipyco import pyon
+from artiq.gui.scientific_spinbox import ScientificSpinBox
+from artiq.gui.tools import LayoutWidget, WheelFilter, disable_scroll_wheel
 
 from .._qt import QtCore, QtGui, QtWidgets
 from ..utils import (
+    ExecutionMode,
     PARAMS_ARG_KEY,
     NoAxesMode,
+    merge_ndscan_params,
     shorten_to_unambiguous_suffixes,
 )
+from ..experiment.optimize import ALGORITHM_REGISTRY
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
 from .scan_options import list_scan_option_types
 from .utils import (
@@ -25,6 +32,39 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+SCAN_SKIP_PERSISTENT_TRANSITORY_TOOLTIP = (
+    "If more than the configured limit of transitory errors occur for a "
+    "single scan point, skip it and attempt the next point instead of "
+    "terminating the entire scan. Does not affect regular exceptions."
+)
+
+OPTIMISE_SKIP_PERSISTENT_TRANSITORY_TOOLTIP = (
+    "If more than the configured limit of transitory errors occur for a "
+    "single optimisation point, continue by telling the optimiser that point "
+    "has np.inf cost instead of terminating the entire optimisation. "
+    "Does not affect regular exceptions."
+)
+
+
+def _make_algorithm_value_box(
+    minimum: float, maximum: float, initial: float, *, step=None
+):
+    box = ScientificSpinBox()
+    disable_scroll_wheel(box)
+    box.setDecimals(8)
+    if hasattr(box, "setPrecision"):
+        box.setPrecision()
+    else:
+        box.setSigFigs()
+    box.setMinimum(minimum)
+    box.setMaximum(maximum)
+    if step is not None:
+        box.setSingleStep(step)
+    box.setRelativeStep()
+    box.setValue(initial)
+    box.setMinimumWidth(box.minimumSizeHint().width())
+    return box
 
 
 def _try_extract_ndscan_params(
@@ -45,7 +85,8 @@ def _try_extract_ndscan_params(
         return None, arguments
 
     state = arg.get("state", None)
-    params = pyon.decode(state if state else arg["desc"]["default"])
+    default_params = pyon.decode(arg["desc"]["default"])
+    params = merge_ndscan_params(default_params, pyon.decode(state) if state else None)
     vanilla_args = arguments.copy()
     del vanilla_args[PARAMS_ARG_KEY]
     return params, vanilla_args
@@ -71,20 +112,45 @@ class ScanOptions:
     to render the entire editor area.
     """
 
-    def __init__(self, current_scan: dict[str, Any]):
+    def __init__(self, current_params: dict[str, Any]):
+        self._row_items = {}
+        current_scan = current_params.get("scan", {})
+        current_optimise = current_params.get("optimise", {})
+
+        # Mapping between display names and averaging method values
+        self._averaging_method_map = {"Mean": "mean", "Median": "median"}
+        self._averaging_method_reverse_map = {
+            v: k for k, v in self._averaging_method_map.items()
+        }
+
+        self.execution_mode_container = QtWidgets.QWidget()
+        execution_mode_layout = QtWidgets.QHBoxLayout()
+        execution_mode_layout.setContentsMargins(5, 5, 5, 5)
+        self.execution_mode_container.setLayout(execution_mode_layout)
+
+        self.execution_mode_box = QtWidgets.QComboBox()
+        self.execution_mode_box.addItems([m.value for m in ExecutionMode])
+        self.execution_mode_box.setToolTip(
+            "Choose whether to run a scan or an optimisation."
+        )
+        mode = ExecutionMode[
+            current_params.get("execution_mode", ExecutionMode.scan.name)
+        ]
+        self.execution_mode_box.setCurrentText(mode.value)
+        execution_mode_layout.addWidget(self.execution_mode_box)
+        execution_mode_layout.setStretchFactor(self.execution_mode_box, 0)
+        execution_mode_layout.addStretch()
+
         self.num_repeats_container = QtWidgets.QWidget()
         num_repeats_layout = QtWidgets.QHBoxLayout()
         num_repeats_layout.setContentsMargins(5, 5, 5, 5)
         self.num_repeats_container.setLayout(num_repeats_layout)
 
-        num_repeats_label = QtWidgets.QLabel("Number of repeats of scan: ")
-        num_repeats_layout.addWidget(num_repeats_label)
-        num_repeats_layout.setStretchFactor(num_repeats_label, 0)
-
         self.num_repeats_box = QtWidgets.QSpinBox()
         self.num_repeats_box.setMinimum(1)
         # A gratuitous, but hopefully generous restriction
         self.num_repeats_box.setMaximum(2**16)
+        self.num_repeats_box.setToolTip("Number of times to repeat the full scan")
         num_repeats_layout.addWidget(self.num_repeats_box)
         num_repeats_layout.setStretchFactor(self.num_repeats_box, 0)
 
@@ -112,16 +178,13 @@ class ScanOptions:
         num_repeats_per_point_layout.setContentsMargins(5, 5, 5, 5)
         self.num_repeats_per_point_container.setLayout(num_repeats_per_point_layout)
 
-        num_repeats_per_point_label = QtWidgets.QLabel(
-            "Number of consecutive repeats of each point: "
-        )
-        num_repeats_per_point_layout.addWidget(num_repeats_per_point_label)
-        num_repeats_per_point_layout.setStretchFactor(num_repeats_per_point_label, 0)
-
         self.num_repeats_per_point_box = QtWidgets.QSpinBox()
         self.num_repeats_per_point_box.setMinimum(1)
         # A gratuitous, but hopefully generous restriction
         self.num_repeats_per_point_box.setMaximum(2**16)
+        self.num_repeats_per_point_box.setToolTip(
+            "Number of consecutive acquisitions to perform at each scan point"
+        )
         self.num_repeats_per_point_box.setValue(
             current_scan.get("num_repeats_per_point", 1)
         )
@@ -136,12 +199,11 @@ class ScanOptions:
         no_axis_layout.setContentsMargins(5, 5, 5, 5)
         self.no_axis_container.setLayout(no_axis_layout)
 
-        no_axis_label = QtWidgets.QLabel("No-axis mode: ")
-        no_axis_layout.addWidget(no_axis_label)
-        no_axis_layout.setStretchFactor(no_axis_label, 0)
-
         self.no_axes_box = QtWidgets.QComboBox()
         self.no_axes_box.addItems([m.value for m in NoAxesMode])
+        self.no_axes_box.setToolTip(
+            "Choose what to do when no scan axes are configured."
+        )
         mode = NoAxesMode[current_scan.get("no_axes_mode", "single")]
         self.no_axes_box.setCurrentText(mode.value)
         no_axis_layout.addWidget(self.no_axes_box)
@@ -156,15 +218,12 @@ class ScanOptions:
         randomise_globally_layout.setContentsMargins(5, 5, 5, 5)
         self.randomise_globally_container.setLayout(randomise_globally_layout)
 
-        randomise_globally_label = QtWidgets.QLabel(
-            "Randomise point order across axes: "
-        )
-        randomise_globally_layout.addWidget(randomise_globally_label)
-        randomise_globally_layout.setStretchFactor(randomise_globally_label, 0)
-
         self.randomise_globally_box = QtWidgets.QCheckBox()
         self.randomise_globally_box.setChecked(
             current_scan.get("randomise_order_globally", False)
+        )
+        self.randomise_globally_box.setToolTip(
+            "Randomise the overall point order across all scan axes."
         )
         randomise_globally_layout.addWidget(self.randomise_globally_box)
         randomise_globally_layout.setStretchFactor(self.randomise_globally_box, 1)
@@ -178,51 +237,417 @@ class ScanOptions:
             skip_persistently_failing_layout
         )
 
-        skip_persistently_failing_label = QtWidgets.QLabel(
-            "Skip point if transitory errors persist: "
-        )
-        skip_persistently_failing_layout.addWidget(skip_persistently_failing_label)
-        skip_persistently_failing_layout.setStretchFactor(
-            skip_persistently_failing_label, 0
-        )
-
         self.skip_persistently_failing_box = QtWidgets.QCheckBox()
         self.skip_persistently_failing_box.setChecked(
             current_scan.get("skip_on_persistent_transitory_error", False)
         )
         self.skip_persistently_failing_box.setToolTip(
-            "If more than the configured limit of transitory errors occur for a "
-            + "single scan point, skip it and attempt the next point instead of "
-            + "terminating the entire scan. Does not affect regular exceptions."
+            SCAN_SKIP_PERSISTENT_TRANSITORY_TOOLTIP
         )
         skip_persistently_failing_layout.addWidget(self.skip_persistently_failing_box)
         skip_persistently_failing_layout.setStretchFactor(
             self.skip_persistently_failing_box, 1
         )
 
-    def get_widgets(self) -> list[QtWidgets.QWidget]:
+        #
+
+        self.objective_channel_map = {}
+        self.objective_container = QtWidgets.QWidget()
+        objective_layout = QtWidgets.QHBoxLayout()
+        objective_layout.setContentsMargins(5, 5, 5, 5)
+        self.objective_container.setLayout(objective_layout)
+
+        self.objective_box = QtWidgets.QComboBox()
+        self.objective_box.setToolTip("Select the numeric result channel to optimise.")
+        self._add_objective_channel("<Select objective channel>", "")
+        result_channels = current_params.get("result_channels", {})
+
+        shortened = shorten_to_unambiguous_suffixes(
+            result_channels.keys(), lambda fqn, n: "/".join(fqn.split("/")[-n:])
+        )
+        for path, desc in result_channels.items():
+            if desc["type"] not in {"float", "int"}:
+                continue
+            short_name = shortened[path]
+            label = (
+                f"{desc['description']} ({short_name})"
+                if desc["description"] and desc["description"] != short_name
+                else short_name
+            )
+            self._add_objective_channel(label, path)
+        objective_layout.addWidget(self.objective_box)
+        objective_layout.setStretchFactor(self.objective_box, 1)
+
+        self.objective_direction_box = QtWidgets.QComboBox()
+        self.objective_direction_box.addItems(["Minimise", "Maximise"])
+        self.objective_direction_box.setToolTip(
+            "Choose whether lower or higher objective values are better."
+        )
+        objective_layout.addWidget(self.objective_direction_box)
+        objective_layout.setStretchFactor(self.objective_direction_box, 0)
+
+        current_objective = current_optimise.get("objective", {})
+        current_channel = current_objective.get("channel", "")
+        for label, path in self.objective_channel_map.items():
+            if path == current_channel:
+                self.objective_box.setCurrentText(label)
+                break
+        else:
+            if current_channel:
+                missing_label = f"<Missing channel: {current_channel}>"
+                self._add_objective_channel(missing_label, current_channel)
+                self.objective_box.setCurrentText(missing_label)
+        self.objective_direction_box.setCurrentText(
+            "Maximise"
+            if current_objective.get("direction", "min") == "max"
+            else "Minimise"
+        )
+
+        self.algorithm_settings_container = QtWidgets.QWidget()
+        algorithm_settings_layout = QtWidgets.QVBoxLayout()
+        algorithm_settings_layout.setContentsMargins(5, 5, 5, 5)
+        self.algorithm_settings_container.setLayout(algorithm_settings_layout)
+
+        algorithm_row_layout = QtWidgets.QHBoxLayout()
+        algorithm_settings_layout.addLayout(algorithm_row_layout)
+        self.algorithm_kind_map = {}
+        self.algorithm_box = QtWidgets.QComboBox()
+
+        # Populate algorithm choices from registry
+        for kind, algo_info in ALGORITHM_REGISTRY.items():
+            display_name = algo_info["display_name"]
+            self._add_algorithm_choice(display_name, kind)
+
+        self.algorithm_box.setToolTip("Choose the optimisation algorithm.")
+        algorithm_row_layout.addWidget(self.algorithm_box)
+        algorithm_row_layout.setStretchFactor(self.algorithm_box, 1)
+
+        current_algorithm = current_optimise.get("algorithm", {})
+        current_algorithm_kind = current_algorithm.get("kind", "nelder_mead")
+        for label, kind in self.algorithm_kind_map.items():
+            if kind == current_algorithm_kind:
+                self.algorithm_box.setCurrentText(label)
+                break
+        else:
+            if current_algorithm_kind:
+                missing_label = f"<Unknown algorithm: {current_algorithm_kind}>"
+                self._add_algorithm_choice(missing_label, current_algorithm_kind)
+                self.algorithm_box.setCurrentText(missing_label)
+
+        # Store parameter widgets by algorithm kind and parameter name
+        self.algorithm_parameter_widgets = {}
+        self.algorithm_parameter_layouts = []
+
+        # Create parameter layouts for each algorithm
+        for kind, algo_info in ALGORITHM_REGISTRY.items():
+            self.algorithm_parameter_widgets[kind] = {}
+
+            # Create a container for this algorithm's parameters
+            params_container = QtWidgets.QWidget()
+            params_layout = QtWidgets.QVBoxLayout()
+            params_layout.setContentsMargins(0, 0, 0, 0)
+
+            # Create widgets for each parameter
+            for param in algo_info["parameters"]:
+                param_row_layout = QtWidgets.QHBoxLayout()
+
+                # Create label
+                label = QtWidgets.QLabel(f"{param.label}:")
+                param_row_layout.addWidget(label)
+
+                # Create appropriate input widget
+                widget = _make_algorithm_value_box(
+                    param.minimum,
+                    param.maximum,
+                    current_algorithm.get(param.name, param.default),
+                    step=param.step,
+                )
+
+                widget.setToolTip(param.tooltip)
+                param_row_layout.addWidget(widget)
+                # param_row_layout.addStretch()
+
+                params_layout.addLayout(param_row_layout)
+                self.algorithm_parameter_widgets[kind][param.name] = widget
+
+            params_container.setLayout(params_layout)
+            self.algorithm_parameter_layouts.append((kind, params_container))
+            algorithm_settings_layout.addWidget(params_container)
+
+        # Show/hide parameter containers based on selected algorithm
+        self._update_algorithm_parameters()
+
+        self.optimise_acquisition_container = QtWidgets.QWidget()
+        optimise_acquisition_layout = QtWidgets.QHBoxLayout()
+        optimise_acquisition_layout.setContentsMargins(5, 5, 5, 5)
+        self.optimise_acquisition_container.setLayout(optimise_acquisition_layout)
+
+        repeats_label = QtWidgets.QLabel("Repeats:")
+        optimise_acquisition_layout.addWidget(repeats_label)
+        self.optimise_num_repeats_per_point_box = QtWidgets.QSpinBox()
+        self.optimise_num_repeats_per_point_box.setMinimum(1)
+        self.optimise_num_repeats_per_point_box.setMaximum(10**6)
+        self.optimise_num_repeats_per_point_box.setToolTip(
+            "How many times to acquire each optimiser point before aggregating it."
+        )
+        self.optimise_num_repeats_per_point_box.setValue(
+            current_optimise.get("num_repeats_per_point", 1)
+        )
+        optimise_acquisition_layout.addWidget(self.optimise_num_repeats_per_point_box)
+
+        averaging_label = QtWidgets.QLabel("Averaging:")
+        optimise_acquisition_layout.addWidget(averaging_label)
+        self.optimise_averaging_method_box = QtWidgets.QComboBox()
+        self.optimise_averaging_method_box.addItems(self._averaging_method_map.keys())
+        self.optimise_averaging_method_box.setToolTip(
+            "How repeated objective measurements are combined before updating the optimiser."
+        )
+        self.optimise_averaging_method_box.setCurrentText(
+            self._averaging_method_reverse_map.get(
+                current_optimise.get("averaging_method", "mean"), "Mean"
+            )
+        )
+        optimise_acquisition_layout.addWidget(self.optimise_averaging_method_box)
+
+        max_evals_label = QtWidgets.QLabel("Max evals:")
+        optimise_acquisition_layout.addWidget(max_evals_label)
+        self.optimise_max_evals_box = QtWidgets.QSpinBox()
+        self.optimise_max_evals_box.setMinimum(1)
+        self.optimise_max_evals_box.setMaximum(10**7)
+        self.optimise_max_evals_box.setToolTip(
+            "Maximum number of objective evaluations before stopping."
+        )
+        self.optimise_max_evals_box.setValue(current_optimise.get("max_evals", 100))
+        optimise_acquisition_layout.addWidget(self.optimise_max_evals_box)
+        optimise_acquisition_layout.addStretch()
+
+        self.optimise_skip_persistently_failing_container = QtWidgets.QWidget()
+        optimise_skip_layout = QtWidgets.QHBoxLayout()
+        optimise_skip_layout.setContentsMargins(5, 5, 5, 5)
+        self.optimise_skip_persistently_failing_container.setLayout(
+            optimise_skip_layout
+        )
+        self.optimise_skip_persistently_failing_box = QtWidgets.QCheckBox()
+        self.optimise_skip_persistently_failing_box.setChecked(
+            current_optimise.get("skip_on_persistent_transitory_error", False)
+        )
+        self.optimise_skip_persistently_failing_box.setToolTip(
+            OPTIMISE_SKIP_PERSISTENT_TRANSITORY_TOOLTIP
+        )
+        optimise_skip_layout.addWidget(self.optimise_skip_persistently_failing_box)
+        optimise_skip_layout.setStretchFactor(
+            self.optimise_skip_persistently_failing_box, 1
+        )
+
+        for widget in [
+            self.execution_mode_box,
+            self.num_repeats_box,
+            self.infinite_repeat_box,
+            self.num_repeats_per_point_box,
+            self.no_axes_box,
+            self.randomise_globally_box,
+            self.skip_persistently_failing_box,
+            self.objective_box,
+            self.objective_direction_box,
+            self.algorithm_box,
+            self.optimise_num_repeats_per_point_box,
+            self.optimise_averaging_method_box,
+            self.optimise_max_evals_box,
+            self.optimise_skip_persistently_failing_box,
+        ]:
+            try:
+                widget.currentIndexChanged.connect(self._update_visibility)
+            except AttributeError:
+                pass
+            try:
+                widget.stateChanged.connect(self._update_visibility)
+            except AttributeError:
+                pass
+
+        # Connect algorithm box to update parameter visibility
+        self.algorithm_box.currentIndexChanged.connect(
+            self._update_algorithm_parameters
+        )
+
+        self._update_visibility()
+
+    def current_mode(self) -> str:
+        return ExecutionMode(self.execution_mode_box.currentText()).name
+
+    def _add_objective_channel(self, label: str, path: str) -> None:
+        self.objective_channel_map[label] = path
+        self.objective_box.addItem(label)
+
+    def _add_algorithm_choice(self, label: str, kind: str) -> None:
+        self.algorithm_kind_map[label] = kind
+        self.algorithm_box.addItem(label)
+
+    def connect_change_signal(self, callback) -> None:
+        for widget in [
+            self.execution_mode_box,
+            self.num_repeats_box,
+            self.infinite_repeat_box,
+            self.num_repeats_per_point_box,
+            self.no_axes_box,
+            self.randomise_globally_box,
+            self.skip_persistently_failing_box,
+            self.objective_box,
+            self.objective_direction_box,
+            self.algorithm_box,
+            self.optimise_num_repeats_per_point_box,
+            self.optimise_averaging_method_box,
+            self.optimise_skip_persistently_failing_box,
+        ]:
+            try:
+                widget.currentIndexChanged.connect(callback)
+            except AttributeError:
+                pass
+            try:
+                widget.valueChanged.connect(callback)
+            except AttributeError:
+                pass
+            try:
+                widget.stateChanged.connect(callback)
+            except AttributeError:
+                pass
+
+        # Connect algorithm parameter widgets
+        for algo_kind, params_dict in self.algorithm_parameter_widgets.items():
+            for param_name, widget in params_dict.items():
+                try:
+                    widget.currentIndexChanged.connect(callback)
+                except AttributeError:
+                    pass
+                try:
+                    widget.valueChanged.connect(callback)
+                except AttributeError:
+                    pass
+                try:
+                    widget.stateChanged.connect(callback)
+                except AttributeError:
+                    pass
+
+    def get_rows(self) -> list[tuple[str, QtWidgets.QWidget]]:
+        # Create separator widget
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+
         return [
+            ("Execution mode", self.execution_mode_container),
+            ("Number of repeats of scan", self.num_repeats_container),
+            (
+                "Number of consecutive repeats of each point",
+                self.num_repeats_per_point_container,
+            ),
+            ("No-axis mode", self.no_axis_container),
+            ("Randomise point order across axes", self.randomise_globally_container),
+            (
+                "Skip point if transitory errors persist",
+                self.skip_persistently_failing_container,
+            ),
+            ("Objective channel", self.objective_container),
+            ("Point acquisition", self.optimise_acquisition_container),
+            (
+                "Apply maximally bad objective result if transitory errors persist",
+                self.optimise_skip_persistently_failing_container,
+            ),
+            ("", separator),
+            ("Algorithm settings", self.algorithm_settings_container),
+        ]
+
+    def register_row_item(
+        self, widget: QtWidgets.QWidget, item: QtWidgets.QTreeWidgetItem
+    ) -> None:
+        self._row_items[widget] = item
+        self._update_visibility()
+
+    def write_to_params(self, params: dict[str, Any]) -> None:
+        mode = self.current_mode()
+        params["execution_mode"] = mode
+
+        if mode == ExecutionMode.scan.name:
+            scan = params.setdefault("scan", {})
+
+            scan["num_repeats"] = (
+                NUM_REPEATS_INFINITE
+                if self.infinite_repeat_box.isChecked()
+                else self.num_repeats_box.value()
+            )
+            scan["num_repeats_per_point"] = self.num_repeats_per_point_box.value()
+            scan["no_axes_mode"] = NoAxesMode(self.no_axes_box.currentText()).name
+            scan["randomise_order_globally"] = self.randomise_globally_box.isChecked()
+            scan["skip_on_persistent_transitory_error"] = (
+                self.skip_persistently_failing_box.isChecked()
+            )
+            return
+
+        optimise = params.setdefault("optimise", {})
+        objective_label = self.objective_box.currentText()
+        optimise["objective"] = {
+            "channel": self.objective_channel_map.get(objective_label, ""),
+            "direction": (
+                "max"
+                if self.objective_direction_box.currentText() == "Maximise"
+                else "min"
+            ),
+        }
+        optimise["algorithm"] = {
+            "kind": self.algorithm_kind_map.get(
+                self.algorithm_box.currentText(), "nelder_mead"
+            ),
+        }
+
+        # Add parameters from the currently selected algorithm
+        current_algorithm_kind = optimise["algorithm"]["kind"]
+        if current_algorithm_kind in self.algorithm_parameter_widgets:
+            for param_name, widget in self.algorithm_parameter_widgets[
+                current_algorithm_kind
+            ].items():
+                optimise["algorithm"][param_name] = widget.value()
+        optimise["num_repeats_per_point"] = (
+            self.optimise_num_repeats_per_point_box.value()
+        )
+        optimise["averaging_method"] = self._averaging_method_map.get(
+            self.optimise_averaging_method_box.currentText(), "mean"
+        )
+        optimise["max_evals"] = self.optimise_max_evals_box.value()
+        optimise["skip_on_persistent_transitory_error"] = (
+            self.optimise_skip_persistently_failing_box.isChecked()
+        )
+
+    def _update_visibility(self, *_args):
+        is_scan = self.current_mode() == ExecutionMode.scan.name
+        for widget in [
             self.num_repeats_container,
             self.num_repeats_per_point_container,
             self.no_axis_container,
             self.randomise_globally_container,
             self.skip_persistently_failing_container,
-        ]
+        ]:
+            self._set_row_visible(widget, is_scan)
 
-    def write_to_params(self, params: dict[str, Any]) -> None:
-        scan = params.setdefault("scan", {})
+        for widget in [
+            self.objective_container,
+            self.algorithm_settings_container,
+            self.optimise_acquisition_container,
+            self.optimise_skip_persistently_failing_container,
+        ]:
+            self._set_row_visible(widget, not is_scan)
 
-        scan["num_repeats"] = (
-            NUM_REPEATS_INFINITE
-            if self.infinite_repeat_box.isChecked()
-            else self.num_repeats_box.value()
+    def _update_algorithm_parameters(self, *_args):
+        """Show/hide parameter containers based on selected algorithm."""
+        current_algorithm_kind = self.algorithm_kind_map.get(
+            self.algorithm_box.currentText(), "nelder_mead"
         )
-        scan["num_repeats_per_point"] = self.num_repeats_per_point_box.value()
-        scan["no_axes_mode"] = NoAxesMode(self.no_axes_box.currentText()).name
-        scan["randomise_order_globally"] = self.randomise_globally_box.isChecked()
-        scan["skip_on_persistent_transitory_error"] = (
-            self.skip_persistently_failing_box.isChecked()
-        )
+        for kind, container in self.algorithm_parameter_layouts:
+            container.setVisible(kind == current_algorithm_kind)
+
+    def _set_row_visible(self, widget: QtWidgets.QWidget, visible: bool) -> None:
+        widget.setVisible(visible)
+        item = self._row_items.get(widget)
+        if item is not None:
+            item.setHidden(not visible)
 
 
 class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
@@ -297,7 +722,11 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
 
             self.scan_options = None
             if "scan" in ndscan_params:
-                self.scan_options = ScanOptions(ndscan_params["scan"])
+                self.scan_options = ScanOptions(ndscan_params)
+                self.scan_options.connect_change_signal(self._set_save_timer)
+                self.scan_options.execution_mode_box.currentIndexChanged.connect(
+                    self._execution_mode_changed
+                )
 
             for fqn, path in ndscan_params["always_shown"]:
                 self._append_param_items(fqn, path, True)
@@ -320,12 +749,13 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             self._append_line_separator()
 
             if self.scan_options:
-                scan_options_group = self._make_group_header_item("Scan options")
+                scan_options_group = self._make_group_header_item("Execution options")
                 self.addTopLevelItem(scan_options_group)
-                for widget in self.scan_options.get_widgets():
-                    twi = QtWidgets.QTreeWidgetItem()
+                for label, widget in self.scan_options.get_rows():
+                    twi = QtWidgets.QTreeWidgetItem([label])
                     scan_options_group.addChild(twi)
                     self.setItemWidget(twi, 1, widget)
+                    self.scan_options.register_row_item(widget, twi)
                 scan_options_group.setExpanded(True)
 
         buttons_item = QtWidgets.QTreeWidgetItem()
@@ -343,15 +773,15 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         )
         load_hdf5.clicked.connect(dock._load_hdf5_clicked)
 
-        disable_scans = QtWidgets.QPushButton("Disable all scans")
-        disable_scans.setIcon(self._disable_scans_icon)
-        disable_scans.clicked.connect(self.disable_all_scans)
-        disable_scans.setShortcut("Ctrl+R")
+        self._disable_scans_button = QtWidgets.QPushButton("Disable all scans")
+        self._disable_scans_button.setIcon(self._disable_scans_icon)
+        self._disable_scans_button.clicked.connect(self.disable_all_scans)
+        self._disable_scans_button.setShortcut("Ctrl+R")
 
         buttons = LayoutWidget()
         buttons.addWidget(recompute_arguments, col=1)
         buttons.addWidget(load_hdf5, col=2)
-        buttons.addWidget(disable_scans, col=3)
+        buttons.addWidget(self._disable_scans_button, col=3)
         buttons.layout.setColumnStretch(0, 1)
         buttons.layout.setColumnStretch(1, 0)
         buttons.layout.setColumnStretch(2, 0)
@@ -359,6 +789,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         buttons.layout.setColumnStretch(4, 1)
         buttons.layout.setContentsMargins(3, 6, 3, 6)
         self.setItemWidget(buttons_item, 0, buttons)
+        self._update_disable_scans_button()
 
     def save_state(self):
         expanded = []
@@ -383,7 +814,25 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
 
     def disable_all_scans(self):
         for entry in self._param_entries.values():
-            entry.disable_scan()
+            entry.reset_to_fixed()
+        self._set_save_timer()
+
+    def _update_disable_scans_button(self) -> None:
+        if not hasattr(self, "_disable_scans_button"):
+            return
+
+        if self.scan_options is None:
+            text = "Disable all scans"
+            tooltip = "Reset all variable parameters back to Fixed."
+        elif self.scan_options.current_mode() == ExecutionMode.optimise.name:
+            text = "Disable all optimisations"
+            tooltip = "Reset all optimisation parameters back to Fixed values."
+        else:
+            text = "Disable all scans"
+            tooltip = "Reset all scan parameters back to Fixed values."
+
+        self._disable_scans_button.setText(text)
+        self._disable_scans_button.setToolTip(tooltip)
 
     def override_status(self, fqn, path) -> OverrideStatus:
         if (fqn, path) in self._ndscan_params["always_shown"]:
@@ -469,6 +918,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         self.setItemWidget(main_item, 0, label_container)
 
         entry = self._make_override_entry(fqn, path)
+        if self.scan_options is not None:
+            entry.set_execution_mode(self.scan_options.current_mode())
         entry.read_from_params(self._ndscan_params, self.manager.datasets)
         entry.layout.setContentsMargins(3, 1, 3, 6)
 
@@ -650,9 +1101,9 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
 
     def _set_override_line_active(self):
         self._update_param_choice_map()
-        self._add_override_prompt_box.set_choices(
-            [(s, 0) for s in self._param_choice_map.keys()]
-        )
+        self._add_override_prompt_box.set_choices([
+            (s, 0) for s in self._param_choice_map.keys()
+        ])
 
         self._add_override_line.setEnabled(False)
         self._add_override_line.setVisible(False)
@@ -773,20 +1224,55 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
     def _set_save_timer(self):
         self._save_timer.start(500)
 
+    def _execution_mode_changed(self, *_args):
+        if self.scan_options is None:
+            return
+        mode = self.scan_options.current_mode()
+        for entry in self._param_entries.values():
+            entry.set_execution_mode(mode, reset_to_fixed=True)
+        self._update_disable_scans_button()
+        self._set_save_timer()
+
     def _save_to_argument(self):
         # Stop timer if it is still running.
         self._save_timer.stop()
 
         # Reset previous overrides/scan axes, repopulate with currently active ones.
-        self._ndscan_params.setdefault("scan", {})["axes"] = []
+        self._ndscan_params["scan"] = {
+            "axes": [],
+            "num_repeats": 1,
+            "num_repeats_per_point": 1,
+            "no_axes_mode": "single",
+            "randomise_order_globally": False,
+            "skip_on_persistent_transitory_error": False,
+        }
+        self._ndscan_params["optimise"] = {
+            "parameters": [],
+            "objective": {"channel": "", "direction": "min"},
+            "algorithm": {
+                "kind": "nelder_mead",
+                "xatol": 1e-3,
+                "fatol": 1e-3,
+            },
+            "num_repeats_per_point": 1,
+            "averaging_method": "mean",
+            "max_evals": 1000,
+            "skip_on_persistent_transitory_error": False,
+        }
         self._ndscan_params["overrides"] = {}
+        execution_mode = (
+            self.scan_options.current_mode()
+            if self.scan_options is not None
+            else ExecutionMode.scan.name
+        )
         for item in self._param_entries.values():
-            item.write_to_params(self._ndscan_params)
+            item.write_to_params(self._ndscan_params, execution_mode)
 
         if self.scan_options is None:
             # Not actually a scannable experiment – delete the scan metadata key, which
             # we've set above to keep code straightforward.
             del self._ndscan_params["scan"]
+            self._ndscan_params.pop("optimise", None)
         else:
             # Store scan parameters.
             self.scan_options.write_to_params(self._ndscan_params)
@@ -820,6 +1306,9 @@ class OverrideEntry(LayoutWidget):
         self.path = path
 
         self.scan_type = QtWidgets.QComboBox()
+        self.scan_type.setToolTip(
+            "Choose how this parameter is fixed, scanned, or optimised."
+        )
         self.addWidget(self.scan_type, col=0)
 
         self.widget_stack = QtWidgets.QStackedWidget()
@@ -830,9 +1319,12 @@ class OverrideEntry(LayoutWidget):
             self.scan_type.setEnabled(False)
         self.current_option_idx = 0
 
+        self._option_names = []
+        self._visible_option_indices = []
+        self._execution_mode = ExecutionMode.scan.name
         self.options = []
         for name, option_cls in option_classes.items():
-            self.scan_type.addItem(name)
+            self._option_names.append(name)
 
             option = option_cls(self.schema, self.path)
             option.value_changed.connect(self.value_changed)
@@ -845,23 +1337,65 @@ class OverrideEntry(LayoutWidget):
 
             self.widget_stack.addWidget(container)
             self.options.append(option)
-        self.scan_type.currentIndexChanged.connect(self._current_index_changed)
+        self.scan_type.currentIndexChanged.connect(self._scan_type_index_changed)
         self.addWidget(self.widget_stack, col=1)
         self.sync_values = {}
+        self.set_execution_mode(self._execution_mode)
+
+    def set_execution_mode(
+        self, execution_mode: str, reset_to_fixed: bool = False
+    ) -> None:
+        self._execution_mode = execution_mode
+        visible_option_indices = [
+            idx
+            for idx, option in enumerate(self.options)
+            if execution_mode in option.execution_modes
+        ]
+        if not visible_option_indices:
+            visible_option_indices = [0]
+
+        target_idx = self.current_option_idx
+        if target_idx not in visible_option_indices:
+            target_idx = 0
+
+        self._visible_option_indices = visible_option_indices
+        with QtCore.QSignalBlocker(self.scan_type):
+            self.scan_type.clear()
+            for row, idx in enumerate(visible_option_indices):
+                self.scan_type.addItem(self._option_names[idx])
+                self.scan_type.setItemData(
+                    row,
+                    self.options[idx].option_tooltip,
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                )
+            self.scan_type.setCurrentIndex(visible_option_indices.index(target_idx))
+        if reset_to_fixed:
+            self.reset_to_fixed()
+        else:
+            self._set_current_index(target_idx)
 
     def read_from_params(self, params: dict, manager_datasets) -> None:
         id_for_log = format_override_identity(self.schema["fqn"], self.path)
 
-        # Check if this parameter is part of the scan axes
-        for axis in params.get("scan", {}).get("axes", []):
-            if axis["fqn"] == self.schema["fqn"] and axis["path"] == self.path:
-                for idx, option in enumerate(self.options):
-                    if option.attempt_read_from_axis(axis):
-                        self.current_option_idx = idx
-                        self._current_index_changed(idx)
-                        self.scan_type.setCurrentIndex(idx)
-                        return
-                logger.warning(f"Failed to read scan params for {id_for_log}")
+        if self._execution_mode == ExecutionMode.scan.name:
+            for axis in params.get("scan", {}).get("axes", []):
+                if axis["fqn"] == self.schema["fqn"] and axis["path"] == self.path:
+                    for idx, option in enumerate(self.options):
+                        if option.attempt_read_from_axis(axis):
+                            self._select_option(idx)
+                            return
+                    logger.warning(f"Failed to read scan params for {id_for_log}")
+        elif self._execution_mode == ExecutionMode.optimise.name:
+            for parameter in params.get("optimise", {}).get("parameters", []):
+                if (
+                    parameter["fqn"] == self.schema["fqn"]
+                    and parameter["path"] == self.path
+                ):
+                    for idx, option in enumerate(self.options):
+                        if option.attempt_read_from_optimise_parameter(parameter):
+                            self._select_option(idx)
+                            return
+                    logger.warning(f"Failed to read optimise params for {id_for_log}")
 
         for o in params.get("overrides", {}).get(self.schema["fqn"], []):
             if o["path"] == self.path:
@@ -882,17 +1416,42 @@ class OverrideEntry(LayoutWidget):
         self._set_fixed_value(value)
         self.disable_scan()
 
-    def write_to_params(self, params: dict) -> None:
-        self.options[self.scan_type.currentIndex()].write_to_params(params)
+    def write_to_params(self, params: dict, execution_mode: str) -> None:
+        option = self.options[self.current_option_idx]
+        if execution_mode in option.execution_modes:
+            option.write_to_params(params)
 
     def disable_scan(self) -> None:
-        self.scan_type.setCurrentIndex(0)
+        self.reset_to_fixed()
+
+    def reset_to_fixed(self) -> None:
+        self._select_option(0)
 
     def _set_fixed_value(self, value) -> None:
         self.options[0].set_value(value)
         self.options[0].write_sync_values(self.sync_values)
 
-    def _current_index_changed(self, new_idx) -> None:
+    def _scan_type_index_changed(self, new_idx) -> None:
+        if new_idx < 0:
+            return
+        self._set_current_index(self._visible_option_indices[new_idx])
+
+    def _select_option(self, option_idx: int) -> None:
+        if option_idx not in self._visible_option_indices:
+            logger.warning(
+                "Ignoring unavailable option '%s' for %s in mode '%s'",
+                self._option_names[option_idx],
+                format_override_identity(self.schema["fqn"], self.path),
+                self._execution_mode,
+            )
+            return
+        with QtCore.QSignalBlocker(self.scan_type):
+            self.scan_type.setCurrentIndex(
+                self._visible_option_indices.index(option_idx)
+            )
+        self._set_current_index(option_idx)
+
+    def _set_current_index(self, new_idx) -> None:
         self.options[self.current_option_idx].write_sync_values(self.sync_values)
         self.options[new_idx].read_sync_values(self.sync_values)
         self.widget_stack.setCurrentIndex(new_idx)
