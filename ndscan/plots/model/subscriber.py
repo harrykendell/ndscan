@@ -71,8 +71,9 @@ class SubscriberRoot(Root):
                     self._prefix, schema_revision, self._context
                 )
             else:
+                is_optimising = d("execution_mode") == "optimise"
                 self._model = SubscriberScanModel(
-                    axes, self._prefix, schema_revision, self._context
+                    axes, self._prefix, schema_revision, self._context, is_optimising
                 )
 
             self._axes_initialised = True
@@ -164,9 +165,11 @@ class SubscriberScanModel(ScanModel):
         prefix: str,
         schema_revision: int,
         context: Context,
+        is_optimising: bool = False,
     ):
         super().__init__(axes, schema_revision, context)
         self._prefix = prefix
+        self._is_optimising = is_optimising
         self._series_initialised = False
         self._online_analyses_initialised = False
         self._channel_schemata = None
@@ -209,6 +212,7 @@ class SubscriberScanModel(ScanModel):
                     # Make sure source exists.
                     self.get_analysis_result_source(name)
             self._analysis_results_json = analysis_results_json
+
         for name, source in self._analysis_result_sources.items():
             source.set(values.get(self._prefix + "analysis_result." + name))
 
@@ -237,6 +241,9 @@ class SubscriberScanModel(ScanModel):
 
     def get_point_data(self) -> dict[str, Any]:
         return self._point_data
+
+    def is_optimising(self) -> bool:
+        return self._is_optimising
 
     def get_analysis_result_source(self, name: str) -> FixedDataSource | None:
         if name not in self._analysis_result_sources:
