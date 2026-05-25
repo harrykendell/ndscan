@@ -10,6 +10,8 @@ from artiq.language import HasEnvironment
 
 from .optimizers import (
     ALGORITHM_REGISTRY,
+    BayesianOptimizer,
+    BayesianOptimizerOptimizeAlgorithmSpec,
     CoordinateSearchOptimizeAlgorithmSpec,
     CoordinateSearchOptimizer,
     NelderMeadOptimizeAlgorithmSpec,
@@ -28,12 +30,14 @@ from .scan_runner import ScanAxis, select_runner_class
 __all__ = [
     "ObjectiveSpec",
     "OptimizeAlgorithmSpec",
+    "BayesianOptimizerOptimizeAlgorithmSpec",
     "NelderMeadOptimizeAlgorithmSpec",
     "CoordinateSearchOptimizeAlgorithmSpec",
     "OptimizeAcquisitionSpec",
     "OptimizeAxis",
     "OptimizeSpec",
     "Optimizer",
+    "BayesianOptimizer",
     "NelderMeadOptimizer",
     "CoordinateSearchOptimizer",
     "OptimizeRunner",

@@ -20,6 +20,9 @@ dependencies = [
     "pyqtgraph>=0.13.3",
     "qasync>=0.27.1",
     "sipyco",
+    "torch",
+    "gpytorch",
+    "botorch",
 ]
 
 [project.scripts]
@@ -64,4 +67,4 @@ _fmt-test = "ruff format --check examples ndscan test"
 fmt-test.sequence = ["_fmt-test-imports", "_fmt-test"]
 
 lint = "ruff check examples ndscan test"
-test = "python -m unittest discover -v test"
+test = "./run_tests.sh"

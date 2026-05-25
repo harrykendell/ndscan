@@ -114,9 +114,12 @@ class ConciseFailureResult(unittest.TextTestResult):
         self._add_concise_failure("FAIL", test, err)
 
     def _add_concise_failure(self, kind, test, err):
-        self.concise_failures.append(
-            (kind, _test_name(test), _exception_summary(err), *_test_location(test))
-        )
+        self.concise_failures.append((
+            kind,
+            _test_name(test),
+            _exception_summary(err),
+            *_test_location(test),
+        ))
 
     def printConciseFailures(self):
         if not self.concise_failures:
@@ -129,6 +132,15 @@ class ConciseFailureResult(unittest.TextTestResult):
 
         self._write_github_summary()
         self._write_github_annotations()
+
+    def printConciseSkips(self):
+        if not self.skipped:
+            return
+
+        self.stream.writeln()
+        self.stream.writeln("Skipped cases:")
+        for test, reason in self.skipped:
+            self.stream.writeln(f"- {test}: {reason}")
 
     def _write_github_summary(self):
         summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -168,6 +180,7 @@ class ConciseFailureRunner(unittest.TextTestRunner):
     def run(self, test):
         result = super().run(test)
         result.printConciseFailures()
+        result.printConciseSkips()
         return result
 
 
