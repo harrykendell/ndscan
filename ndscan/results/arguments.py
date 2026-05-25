@@ -100,6 +100,51 @@ def dump_scan(schema: dict[str, Any]) -> Iterable[str]:
     yield f" - Randomise order globally: {scan['randomise_order_globally']}"
 
 
+def dump_optimise(schema: dict[str, Any]) -> Iterable[str]:
+    optimise = schema.get("optimise", {})
+    parameters = optimise.get("parameters", [])
+    if not parameters:
+        yield "No optimisation parameters configured"
+        return
+
+    yield " - Parameters:"
+    for parameter in parameters:
+        fqn = parameter["fqn"]
+        ps = schema["schemata"][fqn]
+        path = parameter["path"] or "*"
+        yield f"   - {ps['description']} ({fqn}@{path}):"
+        yield (
+            "     min="
+            + format_numeric(parameter["min"], ps["spec"])
+            + ", initial="
+            + format_numeric(parameter["initial"], ps["spec"])
+            + ", max="
+            + format_numeric(parameter["max"], ps["spec"])
+        )
+
+    objective = optimise.get("objective", {})
+    yield f" - Objective channel: {objective.get('channel', '')}"
+    yield f" - Objective direction: {objective.get('direction', 'min')}"
+
+    algorithm = optimise.get("algorithm", {})
+    yield f" - Algorithm: {algorithm.get('kind', 'nelder_mead')}"
+    yield f" - Max evaluations: {optimise.get('max_evals', 100)}"
+    yield f" - xatol (fraction of span): {algorithm.get('xatol', 1e-3)}"
+    yield f" - fatol: {algorithm.get('fatol', 1e-3)}"
+    yield (
+        " - Repeats per optimiser point: "
+        + str(optimise.get("num_repeats_per_point", 1))
+    )
+    yield (
+        " - Averaging method: "
+        + str(optimise.get("averaging_method", "mean"))
+    )
+    yield (
+        " - Give point np.inf cost if transitory errors persist: "
+        + str(optimise.get("skip_on_persistent_transitory_error", False))
+    )
+
+
 def dump_vanilla_artiq_args(arguments: dict[str, Any]) -> Iterable[str]:
     """Format all non-ndscan (vanilla ARTIQ) arguments for printing as a list."""
     for name, value in arguments.items():
@@ -115,10 +160,16 @@ def summarise(schema: dict[str, Any]) -> str:
     """
     result = ""
 
-    result += "Scan settings\n"
-    result += "=============\n"
+    execution_mode = schema.get("execution_mode", "scan")
+    section_title = "Optimise settings" if execution_mode == "optimise" else "Scan settings"
+    result += section_title + "\n"
+    result += "=" * len(section_title) + "\n"
     result += "\n"
-    for s in dump_scan(schema):
+    if execution_mode == "optimise":
+        lines = dump_optimise(schema)
+    else:
+        lines = dump_scan(schema)
+    for s in lines:
         result += s + "\n"
     result += "\n"
 
