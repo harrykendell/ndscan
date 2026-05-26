@@ -144,6 +144,9 @@ class OptimizerCase(HasEnvironmentCase):
         )
         _evaluate_optimizer(opt, lambda x: x[0] ** 3 / 3 + 5 * x[0] ** 2 / 2 - 6 * x[0])
 
+        # ensure the optimizer terminated due to maxeval or convergence, not because of an error
+        self.assertIn(opt.termination_reason(), ["max_evals_reached", "converged"])
+
         best_point, best_value = opt.best()
         self.assertAlmostEqual(best_point[0], 1.0, places=2)
         self.assertAlmostEqual(best_value, -19 / 6, places=2)
@@ -160,6 +163,9 @@ class OptimizerCase(HasEnvironmentCase):
         _evaluate_optimizer(
             opt, lambda x: x[0] ** 3 / 3 + 5 * x[0] ** 2 / 2 - 6 * x[0] + x[1]
         )
+
+        # ensure the optimizer terminated due to maxeval or convergence, not because of an error
+        self.assertIn(opt.termination_reason(), ["max_evals_reached", "converged"])
 
         best_point, best_value = opt.best()
         self.assertAlmostEqual(best_point[0], 1.0, places=2)
