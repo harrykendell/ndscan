@@ -13,6 +13,7 @@ The two main entry points into the :class:`.ExpFragment` universe are
 from __future__ import annotations
 
 import logging
+import math
 import random
 import time
 from collections import OrderedDict
@@ -578,6 +579,7 @@ class TopLevelRunner(HasEnvironment):
 
         self._coordinate_sinks = None
         self._optimizer_termination_reason = None
+        self._optimizer_best = None
 
         self.fragment.prepare()
 
@@ -782,6 +784,7 @@ class TopLevelRunner(HasEnvironment):
     def _update_optimizer_best(
         self, point: tuple[float, ...], value: float, std_dev: float
     ):
+        self._optimizer_best = (point, value, std_dev)
         self.set_dataset(
             self.dataset_prefix + "optimizer.best_value", value, broadcast=True
         )
@@ -802,20 +805,52 @@ class TopLevelRunner(HasEnvironment):
             reason,
             broadcast=True,
         )
-        best_value = self.get_dataset(
-            self.dataset_prefix + "optimizer.best_value", default=None
-        )
-        best_std = self.get_dataset(
-            self.dataset_prefix + "optimizer.best_std", default=None
-        )
-        best_point = tuple(
-            self.get_dataset(
-                self.dataset_prefix + f"optimizer.best_axis_{i}", default=None
+        message = f"Optimizer terminated: {reason}"
+        best = self._format_optimizer_best()
+        if best:
+            message += f"; best result: {best}"
+        logger.info(message)
+
+    def _format_optimizer_best(self):
+        if self._optimizer_best is None:
+            return None
+
+        point, value, _std_dev = self._optimizer_best
+        objective_spec = self._objective_channel.describe()
+        entries = [
+            f"Objective: {self._format_numeric_value(value, objective_spec)}"
+        ]
+        for axis, axis_value in zip(self.spec.axes, point):
+            schema = axis.param_schema
+            name = schema["fqn"].split(".")[-1]
+            entries.append(
+                f"{name}: {self._format_numeric_value(axis_value, schema['spec'])}"
             )
-            for i in range(len(self.spec.axes))
-        )
-        logger.info(
-            f"Optimizer terminated with reason: {reason}: point: {best_point}, value: {best_value}, std_dev: {best_std}"
+        return ", ".join(entries)
+
+    @staticmethod
+    def _format_numeric_value(value: float, spec: dict[str, Any]) -> str:
+        unit = spec.get("unit", "")
+        unit_suffix = f" {unit}" if unit else ""
+        data_to_display_scale = 1 / spec.get("scale", 1)
+        limits = spec.get("min"), spec.get("max")
+        if limits[0] is None or limits[1] is None:
+            limits = value, value
+
+        scaled_span = abs(data_to_display_scale)
+        if limits[1] > limits[0]:
+            scaled_span *= abs(limits[1] - limits[0])
+        elif abs(value) > 0:
+            scaled_span *= abs(value)
+
+        if not math.isfinite(scaled_span) or scaled_span <= 0:
+            precision = 0
+        else:
+            smallest_digit = math.floor(math.log10(scaled_span)) - 3
+            precision = int(-smallest_digit) if smallest_digit < 0 else 0
+
+        return "{0:.{n}f}{1}".format(
+            value * data_to_display_scale, unit_suffix, n=precision
         )
 
     def _set_completed(self):
