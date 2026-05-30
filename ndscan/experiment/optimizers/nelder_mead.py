@@ -17,7 +17,7 @@ from .base import (
 class NelderMeadOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
     xatol: float = 1e-3
     fatol: float = 1e-3
-    simplex_step_fraction: float = 0.25
+    simplex_step_fraction: float = 0.5
 
 
 class NelderMeadOptimizer(Optimizer):

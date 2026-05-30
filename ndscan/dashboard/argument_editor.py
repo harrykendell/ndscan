@@ -124,8 +124,8 @@ class ScanOptions:
         }
         self._reference_normalisation_map = {
             "None": "none",
-            "Subtract initial point": "subtract",
-            "Divide by initial point": "divide",
+            "Subtract": "subtract",
+            "Divide": "divide",
         }
         self._reference_normalisation_reverse_map = {
             v: k for k, v in self._reference_normalisation_map.items()
@@ -265,6 +265,14 @@ class ScanOptions:
         objective_layout.setContentsMargins(5, 5, 5, 5)
         self.objective_container.setLayout(objective_layout)
 
+        self.objective_direction_box = QtWidgets.QComboBox()
+        self.objective_direction_box.addItems(["Minimise", "Maximise"])
+        self.objective_direction_box.setToolTip(
+            "Choose whether lower or higher objective values are better."
+        )
+        objective_layout.addWidget(self.objective_direction_box)
+        objective_layout.setStretchFactor(self.objective_direction_box, 0)
+
         self.objective_box = QtWidgets.QComboBox()
         self.objective_box.setToolTip("Select the numeric result channel to optimise.")
         self._add_objective_channel("<Select objective channel>", "")
@@ -285,14 +293,6 @@ class ScanOptions:
             self._add_objective_channel(label, path)
         objective_layout.addWidget(self.objective_box)
         objective_layout.setStretchFactor(self.objective_box, 1)
-
-        self.objective_direction_box = QtWidgets.QComboBox()
-        self.objective_direction_box.addItems(["Minimise", "Maximise"])
-        self.objective_direction_box.setToolTip(
-            "Choose whether lower or higher objective values are better."
-        )
-        objective_layout.addWidget(self.objective_direction_box)
-        objective_layout.setStretchFactor(self.objective_direction_box, 0)
 
         current_objective = current_optimise.get("objective", {})
         current_channel = current_objective.get("channel", "")
@@ -328,7 +328,18 @@ class ScanOptions:
 
         self.algorithm_box.setToolTip("Choose the optimisation algorithm.")
         algorithm_row_layout.addWidget(self.algorithm_box)
-        algorithm_row_layout.setStretchFactor(self.algorithm_box, 1)
+
+        algorithm_row_layout.addStretch()
+        max_evals_label = QtWidgets.QLabel("Max evals:")
+        algorithm_row_layout.addWidget(max_evals_label)
+        self.optimise_max_evals_box = QtWidgets.QSpinBox()
+        self.optimise_max_evals_box.setMinimum(1)
+        self.optimise_max_evals_box.setMaximum(10**7)
+        self.optimise_max_evals_box.setToolTip(
+            "Maximum number of objective evaluations before stopping."
+        )
+        self.optimise_max_evals_box.setValue(current_optimise.get("max_evals", 100))
+        algorithm_row_layout.addWidget(self.optimise_max_evals_box)
 
         current_algorithm = current_optimise.get("algorithm", {})
         current_algorithm_kind = current_algorithm.get("kind", "nelder_mead")
@@ -390,8 +401,6 @@ class ScanOptions:
         optimise_acquisition_layout.setContentsMargins(5, 5, 5, 5)
         self.optimise_acquisition_container.setLayout(optimise_acquisition_layout)
 
-        repeats_label = QtWidgets.QLabel("Repeats:")
-        optimise_acquisition_layout.addWidget(repeats_label)
         self.optimise_num_repeats_per_point_box = QtWidgets.QSpinBox()
         self.optimise_num_repeats_per_point_box.setMinimum(1)
         self.optimise_num_repeats_per_point_box.setMaximum(10**6)
@@ -402,9 +411,8 @@ class ScanOptions:
             current_optimise.get("num_repeats_per_point", 1)
         )
         optimise_acquisition_layout.addWidget(self.optimise_num_repeats_per_point_box)
-
-        averaging_label = QtWidgets.QLabel("Averaging:")
-        optimise_acquisition_layout.addWidget(averaging_label)
+        repeats_label = QtWidgets.QLabel("times, take the")
+        optimise_acquisition_layout.addWidget(repeats_label)
         self.optimise_averaging_method_box = QtWidgets.QComboBox()
         self.optimise_averaging_method_box.addItems(self._averaging_method_map.keys())
         self.optimise_averaging_method_box.setToolTip(
@@ -416,17 +424,6 @@ class ScanOptions:
             )
         )
         optimise_acquisition_layout.addWidget(self.optimise_averaging_method_box)
-
-        max_evals_label = QtWidgets.QLabel("Max evals:")
-        optimise_acquisition_layout.addWidget(max_evals_label)
-        self.optimise_max_evals_box = QtWidgets.QSpinBox()
-        self.optimise_max_evals_box.setMinimum(1)
-        self.optimise_max_evals_box.setMaximum(10**7)
-        self.optimise_max_evals_box.setToolTip(
-            "Maximum number of objective evaluations before stopping."
-        )
-        self.optimise_max_evals_box.setValue(current_optimise.get("max_evals", 100))
-        optimise_acquisition_layout.addWidget(self.optimise_max_evals_box)
         optimise_acquisition_layout.addStretch()
 
         self.optimise_reference_container = QtWidgets.QWidget()
@@ -434,8 +431,6 @@ class ScanOptions:
         optimise_reference_layout.setContentsMargins(5, 5, 5, 5)
         self.optimise_reference_container.setLayout(optimise_reference_layout)
 
-        reference_normalisation_label = QtWidgets.QLabel("Normalisation:")
-        optimise_reference_layout.addWidget(reference_normalisation_label)
         self.optimise_reference_normalisation_box = QtWidgets.QComboBox()
         self.optimise_reference_normalisation_box.addItems(
             self._reference_normalisation_map.keys()
@@ -451,7 +446,7 @@ class ScanOptions:
         )
         optimise_reference_layout.addWidget(self.optimise_reference_normalisation_box)
 
-        reference_resample_label = QtWidgets.QLabel("Resample interval:")
+        reference_resample_label = QtWidgets.QLabel("(Resampled every")
         optimise_reference_layout.addWidget(reference_resample_label)
         self.optimise_reference_resample_interval_box = QtWidgets.QSpinBox()
         self.optimise_reference_resample_interval_box.setMinimum(1)
@@ -466,6 +461,8 @@ class ScanOptions:
         optimise_reference_layout.addWidget(
             self.optimise_reference_resample_interval_box
         )
+        reference_resample_label2 = QtWidgets.QLabel("points)")
+        optimise_reference_layout.addWidget(reference_resample_label2)
         optimise_reference_layout.addStretch()
 
         self.optimise_skip_persistently_failing_container = QtWidgets.QWidget()
@@ -517,11 +514,15 @@ class ScanOptions:
         self.algorithm_box.currentIndexChanged.connect(
             self._update_algorithm_parameters
         )
+        self.optimise_num_repeats_per_point_box.valueChanged.connect(
+            self._update_optimise_acquisition
+        )
         self.optimise_reference_normalisation_box.currentIndexChanged.connect(
             self._update_reference_normalisation
         )
 
         self._update_visibility()
+        self._update_optimise_acquisition()
         self._update_reference_normalisation()
 
     def current_mode(self) -> str:
@@ -602,10 +603,10 @@ class ScanOptions:
                 self.skip_persistently_failing_container,
             ),
             ("Objective channel", self.objective_container),
-            ("Point acquisition", self.optimise_acquisition_container),
-            ("Reference normalisation", self.optimise_reference_container),
+            ("Repeat acquisition", self.optimise_acquisition_container),
+            ("Normalise from initial point", self.optimise_reference_container),
             (
-                "Apply maximally bad objective result if transitory errors persist",
+                "Skip points with persistent errors",
                 self.optimise_skip_persistently_failing_container,
             ),
             ("", separator),
@@ -703,6 +704,11 @@ class ScanOptions:
             self.optimise_reference_normalisation_box.currentText(), "none"
         )
         self.optimise_reference_resample_interval_box.setEnabled(method != "none")
+
+    def _update_optimise_acquisition(self, *_args):
+        self.optimise_averaging_method_box.setEnabled(
+            self.optimise_num_repeats_per_point_box.value() > 1
+        )
 
     def _update_algorithm_parameters(self, *_args):
         """Show/hide parameter containers based on selected algorithm."""
