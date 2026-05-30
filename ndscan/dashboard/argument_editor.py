@@ -124,8 +124,8 @@ class ScanOptions:
         }
         self._reference_normalisation_map = {
             "None": "none",
-            "Subtract initial point": "subtract",
-            "Divide by initial point": "divide",
+            "Subtract": "subtract",
+            "Divide": "divide",
         }
         self._reference_normalisation_reverse_map = {
             v: k for k, v in self._reference_normalisation_map.items()
@@ -328,7 +328,21 @@ class ScanOptions:
 
         self.algorithm_box.setToolTip("Choose the optimisation algorithm.")
         algorithm_row_layout.addWidget(self.algorithm_box)
-        algorithm_row_layout.setStretchFactor(self.algorithm_box, 1)
+        algorithm_row_layout.setStretchFactor(self.algorithm_box, 0)
+
+        algorithm_row_layout.addStretch()
+        max_evals_label = QtWidgets.QLabel("Max evals:")
+        algorithm_row_layout.addWidget(max_evals_label)
+        self.optimise_max_evals_box = QtWidgets.QSpinBox()
+        self.optimise_max_evals_box.setMinimum(1)
+        self.optimise_max_evals_box.setMaximum(10**7)
+        self.optimise_max_evals_box.setToolTip(
+            "Maximum number of objective evaluations before stopping."
+        )
+        self.optimise_max_evals_box.setValue(current_optimise.get("max_evals", 100))
+        algorithm_row_layout.addWidget(self.optimise_max_evals_box)
+        algorithm_row_layout.setStretchFactor(self.optimise_max_evals_box, 0)
+        algorithm_row_layout.addStretch()
 
         current_algorithm = current_optimise.get("algorithm", {})
         current_algorithm_kind = current_algorithm.get("kind", "nelder_mead")
@@ -390,8 +404,6 @@ class ScanOptions:
         optimise_acquisition_layout.setContentsMargins(5, 5, 5, 5)
         self.optimise_acquisition_container.setLayout(optimise_acquisition_layout)
 
-        repeats_label = QtWidgets.QLabel("Repeats:")
-        optimise_acquisition_layout.addWidget(repeats_label)
         self.optimise_num_repeats_per_point_box = QtWidgets.QSpinBox()
         self.optimise_num_repeats_per_point_box.setMinimum(1)
         self.optimise_num_repeats_per_point_box.setMaximum(10**6)
@@ -402,9 +414,8 @@ class ScanOptions:
             current_optimise.get("num_repeats_per_point", 1)
         )
         optimise_acquisition_layout.addWidget(self.optimise_num_repeats_per_point_box)
-
-        averaging_label = QtWidgets.QLabel("Averaging:")
-        optimise_acquisition_layout.addWidget(averaging_label)
+        repeats_label = QtWidgets.QLabel("times, take the")
+        optimise_acquisition_layout.addWidget(repeats_label)
         self.optimise_averaging_method_box = QtWidgets.QComboBox()
         self.optimise_averaging_method_box.addItems(self._averaging_method_map.keys())
         self.optimise_averaging_method_box.setToolTip(
@@ -416,17 +427,6 @@ class ScanOptions:
             )
         )
         optimise_acquisition_layout.addWidget(self.optimise_averaging_method_box)
-
-        max_evals_label = QtWidgets.QLabel("Max evals:")
-        optimise_acquisition_layout.addWidget(max_evals_label)
-        self.optimise_max_evals_box = QtWidgets.QSpinBox()
-        self.optimise_max_evals_box.setMinimum(1)
-        self.optimise_max_evals_box.setMaximum(10**7)
-        self.optimise_max_evals_box.setToolTip(
-            "Maximum number of objective evaluations before stopping."
-        )
-        self.optimise_max_evals_box.setValue(current_optimise.get("max_evals", 100))
-        optimise_acquisition_layout.addWidget(self.optimise_max_evals_box)
         optimise_acquisition_layout.addStretch()
 
         self.optimise_reference_container = QtWidgets.QWidget()
@@ -434,8 +434,6 @@ class ScanOptions:
         optimise_reference_layout.setContentsMargins(5, 5, 5, 5)
         self.optimise_reference_container.setLayout(optimise_reference_layout)
 
-        reference_normalisation_label = QtWidgets.QLabel("Normalisation:")
-        optimise_reference_layout.addWidget(reference_normalisation_label)
         self.optimise_reference_normalisation_box = QtWidgets.QComboBox()
         self.optimise_reference_normalisation_box.addItems(
             self._reference_normalisation_map.keys()
@@ -451,7 +449,7 @@ class ScanOptions:
         )
         optimise_reference_layout.addWidget(self.optimise_reference_normalisation_box)
 
-        reference_resample_label = QtWidgets.QLabel("Resample interval:")
+        reference_resample_label = QtWidgets.QLabel("(Resampled every")
         optimise_reference_layout.addWidget(reference_resample_label)
         self.optimise_reference_resample_interval_box = QtWidgets.QSpinBox()
         self.optimise_reference_resample_interval_box.setMinimum(1)
@@ -466,6 +464,8 @@ class ScanOptions:
         optimise_reference_layout.addWidget(
             self.optimise_reference_resample_interval_box
         )
+        reference_resample_label2 = QtWidgets.QLabel("points)")
+        optimise_reference_layout.addWidget(reference_resample_label2)
         optimise_reference_layout.addStretch()
 
         self.optimise_skip_persistently_failing_container = QtWidgets.QWidget()
@@ -602,10 +602,10 @@ class ScanOptions:
                 self.skip_persistently_failing_container,
             ),
             ("Objective channel", self.objective_container),
-            ("Point acquisition", self.optimise_acquisition_container),
-            ("Reference normalisation", self.optimise_reference_container),
+            ("Repeat acquisition", self.optimise_acquisition_container),
+            ("Normalise from initial point", self.optimise_reference_container),
             (
-                "Apply maximally bad objective result if transitory errors persist",
+                "Skip points with persistent errors",
                 self.optimise_skip_persistently_failing_container,
             ),
             ("", separator),
