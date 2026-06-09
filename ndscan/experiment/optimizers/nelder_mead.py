@@ -45,6 +45,7 @@ class NelderMeadOptimizer(Optimizer):
         self._xatol = xatol
         self._fatol = fatol
         self._simplex_step_fraction = simplex_step_fraction
+        self._rng = np.random.default_rng()
 
         self._alpha = 1.0
         self._gamma = 2.0
@@ -142,13 +143,15 @@ class NelderMeadOptimizer(Optimizer):
         if np.any(self._span <= 0.0):
             raise ValueError("Optimization bounds must satisfy min < max")
 
-        # Start with the initial point, then add one point per axis by stepping.
-        simplex = [self._clip(self._initial.copy())]
+        # Start with the initial point, then add one random point per axis.
+        initial = self._clip(self._initial.copy())
+        simplex = [initial.copy()]
         for i in range(len(self._initial)):
-            point = self._initial.copy()
-            delta = self._simplex_step_fraction * self._span[i]
-            # Try to perturb in positive direction, otherwise negative
-            point[i] += delta if point[i] + delta <= self._upper[i] else -delta
+            point = initial.copy()
+            point[i] += self._rng.uniform(
+                -self._simplex_step_fraction/2,
+                self._simplex_step_fraction/2,
+            ) * self._span[i]
             simplex.append(self._clip(point))
         return simplex
 
@@ -333,7 +336,7 @@ register_algorithm(
             maximum=1.0,
             default=0.25,
             step=0.01,
-            tooltip="Initial simplex step size as a fraction of the parameter bounds span.",
+            tooltip="Maximum initial simplex size around the initial point as a fraction of the parameter bounds span.",
         ),
     ],
     spec_cls=NelderMeadOptimizeAlgorithmSpec,

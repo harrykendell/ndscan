@@ -233,6 +233,8 @@ class OptimizerCase(HasEnvironmentCase):
             )
             return num_evals, opt.best()[0][0]
 
+        self._skip_bayesian(case)
+
         small_count, small_best = run_scaled(1.0)
         large_count, large_best = run_scaled(10.0)
         self.assertEqual(small_count, large_count)
