@@ -1,44 +1,46 @@
 from __future__ import annotations
-
-import traceback
-from dataclasses import dataclass
-from random import randint
 from typing import Optional
+from dataclasses import dataclass
+import traceback
 
-# standard libraries
+# standard libraries 
 import numpy as np
 import numpy.typing as npt
+from gpytorch.constraints import Interval
+from scipy.stats.qmc import LatinHypercube, scale
 
 # import ML libraries
 import torch
-from botorch.acquisition.knowledge_gradient import qKnowledgeGradient
-from botorch.acquisition.logei import (
-    qLogExpectedImprovement,
-    qLogNoisyExpectedImprovement,
-)
+from random import randint
+from botorch.models import SingleTaskGP
+from botorch.fit import fit_gpytorch_mll
+from botorch.optim.fit import fit_gpytorch_mll_torch
+from botorch.optim import optimize_acqf
+from botorch.exceptions.errors import ModelFittingError
+from gpytorch.constraints import GreaterThan
+from gpytorch.mlls import ExactMarginalLogLikelihood
+from gpytorch.likelihoods import FixedNoiseGaussianLikelihood
+from gpytorch.kernels import MaternKernel, ScaleKernel
+from botorch.models.transforms import Standardize
+
 from botorch.acquisition.monte_carlo import (
     qExpectedImprovement,
-    qProbabilityOfImprovement,
     qUpperConfidenceBound,
-)
-from botorch.acquisition.objective import (
-    GenericMCObjective,
-    ScalarizedPosteriorTransform,
-)
-from botorch.acquisition.utils import prune_inferior_points
-from botorch.exceptions.errors import ModelFittingError
-from botorch.fit import fit_gpytorch_mll
-from botorch.models import SingleTaskGP
-from botorch.models.transforms import Standardize
-from botorch.optim import optimize_acqf
-from botorch.optim.fit import fit_gpytorch_mll_torch
-from botorch.sampling.normal import SobolQMCNormalSampler
-from gpytorch.constraints import GreaterThan
-from gpytorch.kernels import MaternKernel, ScaleKernel
-from gpytorch.likelihoods import FixedNoiseGaussianLikelihood
-from gpytorch.mlls import ExactMarginalLogLikelihood
+    qProbabilityOfImprovement
+    )
+from botorch.acquisition.logei import (
+    qLogExpectedImprovement, 
+    qLogNoisyExpectedImprovement
+    )
+from botorch.acquisition.knowledge_gradient import qKnowledgeGradient
+
 from gpytorch.priors import LogNormalPrior
-from scipy.stats.qmc import LatinHypercube, scale
+from botorch.acquisition.objective import GenericMCObjective
+from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.acquisition.objective import ScalarizedPosteriorTransform 
+from botorch.acquisition.utils import prune_inferior_points
+
+
 
 from .base import (
     AlgorithmParameter,
@@ -48,13 +50,13 @@ from .base import (
 )
 
 
+
 @dataclass
 class BayesianOptimizerOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
     xatol: float = 1e-3
     fatol: float = 1e-3
     n_init: int = 10
     user_seed: int = -1
-
 
 class BayesianOptimizer(Optimizer):
     """
@@ -70,31 +72,29 @@ class BayesianOptimizer(Optimizer):
 
     def __init__(
         self,
-        initial: tuple[float, ...],  # initial samples from GUI
-        lower_bounds: tuple[float, ...],  # lower bounds of active params
-        upper_bounds: tuple[float, ...],  # upper bounds of active params
-        xatol: float,  # tolerance for change in x
-        fatol: float,  # tolerance for change in f(x)
-        n_init: int,  # no.of initial samples to generate
-        user_seed: int,  # user defined seed
+        initial: tuple[float, ...],         # initial samples from GUI
+        lower_bounds: tuple[float, ...],    # lower bounds of active params
+        upper_bounds: tuple[float, ...],    # upper bounds of active params
+        xatol: float,                       # tolerance for change in x
+        fatol: float,                       # tolerance for change in f(x)
+        n_init: int,                        # no.of initial samples to generate
+        user_seed: int,                     # user defined seed
+        # robust_mode: bool,                # use simple/robust optimizer
     ):
 
         # select the acquisition function type
         self.acq_func_type = "logEI"
-
-        #    if acq_func_type is None:
-        #        self.acq_func_type = "logEI"
-        #    else:
-        #        self.acq_func_type = acq_func_type
-
-        self.user_seed = user_seed  # initial seed for reproducibility
-        self.iter_idx = 0  # initial iteration index
-        self.sample_idx = 0  # sample index
-        self._termination_reason: str | None = None  # termination reason
-        self.mc_samples = 500  # no.of Monte Carlo samples (256 - 1024)
+        
+        # simulation parameters
+        self.user_seed = user_seed                  # initial seed for reproducibility
+        self.iter_idx = 0                           # initial iteration index
+        self.sample_idx = 0                         # sample index
+        self._termination_reason: str | None = None # termination reason
+        self._num_asked = 0                         # no.of points asked for
+        self.mc_samples = 500                       # no.of Monte Carlo samples (256 - 1024)
 
         # experimental info
-        self.n_params = len(initial)  # no.of active parameters
+        self.n_params = len(initial)                # no.of active parameters
         self.active_bounds_lower = np.array(lower_bounds, dtype=float)
         self.active_bounds_upper = np.array(upper_bounds, dtype=float)
         self._span = self.active_bounds_upper - self.active_bounds_lower
@@ -106,10 +106,12 @@ class BayesianOptimizer(Optimizer):
         self._xatol = xatol
         self._fatol = fatol
 
-        # simulation parameters
-        self.n_init = int(n_init * np.sqrt(self.n_params))
-
         # generate initial parameter input using LHS sampling
+        if  self.n_params >= 3 : 
+            self.n_init = int(n_init * np.sqrt(self.n_params))
+        else: 
+            self.n_init = self.n_params * n_init
+
         self.x = self.LHS_sampler()
 
         # initialize training dataset
@@ -120,6 +122,16 @@ class BayesianOptimizer(Optimizer):
         self.init_y_var = torch.empty((0, 1), dtype=torch.double)
         self.best_init_y = float("inf")
 
+        # for tracking performance 
+        self.n_test = 20
+        self.fixed_values = None
+        self.output_idx = 0
+        self.z_score = 1.96         # 95% confidence interval
+        self.time_accumulated = 0.0 # run time 
+        
+        # self.noise_robust_mode = robust_mode   # change to True for real experiment
+        self.noise_robust_mode = False           # default 
+    
     def ask(self) -> tuple[float, ...]:
         """
         Suggests the next candidate point to sample and
@@ -142,8 +154,10 @@ class BayesianOptimizer(Optimizer):
                 x_point = self.x[self.sample_idx, :]
                 # increment sample index and calls to ask()
                 self.sample_idx += 1
+                self._num_asked += 1
                 return x_point
 
+            
             # stop sampling, begin optimization
             print("Initial sampling complete.")
             self.iter_idx = 1
@@ -156,7 +170,7 @@ class BayesianOptimizer(Optimizer):
                 print("Model fitting failed. Terminating optimization.")
                 self._termination_reason = "model_fit_failure"
                 return None
-
+            
             # convert the new candidates for experimental use
             new_candidates = new_candidates.reshape(1, self.n_params)
             x_point = self.denormalize(new_candidates)
@@ -164,6 +178,7 @@ class BayesianOptimizer(Optimizer):
             self.init_x = torch.cat((self.init_x, new_candidates))
             # update the iteration
             self.iter_idx += 1
+            self._num_asked += 1
             return x_point
 
         return None
@@ -186,25 +201,26 @@ class BayesianOptimizer(Optimizer):
         del point
         if self._termination_reason is not None:
             return None
-
+        
         # convert to torch tensors and append the data set with the new point(s)
-        self.init_y = torch.cat((
-            self.init_y,
-            torch.tensor(-value, dtype=torch.double).reshape(1, 1),
-        ))  # update y-values
-
+        self.init_y = torch.cat((self.init_y,
+                                 torch.tensor(-value, dtype=torch.double).reshape(1, 1)
+                                 ))     # update y-values
+        
         # add small noise floor for numerical stability in GP fitting
-        noise_floor = 1e-3
+        if  self.noise_robust_mode is True: 
+            noise_floor = 1e-3
+        else: 
+            noise_floor = 0.0
         obs_var = max(std_dev**2, noise_floor)
-        self.init_y_var = torch.cat((
-            self.init_y_var,
-            torch.tensor(obs_var, dtype=torch.double).reshape(1, 1),
-        ))  # update y-variances
-        # obtain the best point so far
+        self.init_y_var = torch.cat((self.init_y_var, 
+                                     torch.tensor(obs_var, dtype=torch.double).reshape(1, 1)
+                                     )) # update y-variances
+         # obtain the best point so far
         self.best_init_y = self.init_y.max().item()
-
+        
         if self.init_y.numel() > self.n_init:  # only check after enough data
-            # check for convergence
+            # check for convergence 
             self._maybe_terminate()
 
         return None
@@ -220,11 +236,11 @@ class BayesianOptimizer(Optimizer):
         if any evaluations completed.
 
         Outputs:
-            - best_x : ((n, d) array) best parameters/point
-            - best_y : (float) best objective function value
+            - best_x : best parameters/point
+            - best_y : best objective function value
         """
         # calculate the total no.of elements in a tensor
-        if self.init_y.numel() == 0:  # PyTorch method
+        if self.init_y.numel() == 0: # PyTorch method
             # no evaluations have been made yet
             return None
 
@@ -243,7 +259,6 @@ class BayesianOptimizer(Optimizer):
     def best_std(self) -> float | None:
         """
         Return the measured standard deviation for the current best point.
-
         """
         if self.init_y.numel() == 0:
             return None
@@ -257,21 +272,20 @@ class BayesianOptimizer(Optimizer):
 
     def _maybe_terminate(self) -> None:
         """
-        Terminates the optimization if we converge.
+        Terminates the optimization if either
+        convergence or max evaluations reached.
         """
-
+        
         if self.iter_idx == 0:
             return  # don't check for termination during initial sampling
-
+        
         # find where the best values occurred
-        best_x, best_y = self.best()  # in physical units
+        best_x, best_y = self.best() # in physical units
 
         # denormalize init_x and flatten init_y
-        all_x_phys = np.array([
-            self.denormalize(self.init_x[i]) for i in range(len(self.init_x))
-        ])
-        all_y = -self.init_y.numpy().flatten()  # negate back to original values
-
+        all_x_phys = np.array([self.denormalize(self.init_x[i]) for i in range(len(self.init_x))])
+        all_y = - self.init_y.numpy().flatten() # negate back to original values
+        
         # get recent 5 points and values for convergence check
         recent_x = all_x_phys[-5:]
         recent_y = all_y[-5:]
@@ -280,36 +294,45 @@ class BayesianOptimizer(Optimizer):
         max_x_delta = max(
             np.max(np.abs((point - best_x) / self._span)) for point in recent_x
         )
-
+        
         # find max change in y
         max_f_delta = max(abs(value - best_y) for value in recent_y)
-
+    
         # get best standard deviation
         best_y_std = self.best_std()
-        self.dynamic_fatol = (
-            2 * best_y_std
-        )  # dynamic fatol based on current noise level
+        self.dynamic_fatol = 2 * best_y_std  # dynamic fatol based on current noise level
 
+        if self.noise_robust_mode is True: 
+            fatol = self.dynamic_fatol
+        else:
+            fatol = self._fatol
+      
         # check if both changes are within the specified tolerances
-        if max_x_delta <= self._xatol and max_f_delta <= self.dynamic_fatol:
+        if max_x_delta <= self._xatol and max_f_delta <= fatol:
+        # if max_x_delta <= self._xatol and max_f_delta <= self._fatol:
             self._termination_reason = "converged"
+    
 
     def get_kernel(self):
         """
         Defines a Matern kernel within a ScaleKernel wrapper.
-            - Uses an ARD to give each dimension gets its own lengthscale
-            - Constrains the lengthscales for numerical stability
-
+        - Uses an ARD to give each dimension gets its own lengthscale
+        - Constrains the lengthscales for numerical stability
+        
         Outputs:
             - covar_module : learned output variance
         """
-        matern_kernel = MaternKernel(
-            nu=2.5,
-            ard_num_dims=self.n_params,  # individual lengthscales
-            lengthscale_constraint=GreaterThan(1e-3),  # constrained lengthscales.
-            lengthscale_prior=LogNormalPrior(-2.0, 1.0),  # prior
-        )
 
+        if self.noise_robust_mode is True:
+            matern_kernel = MaternKernel(nu=2.5,
+                                    ard_num_dims=self.n_params,                 # individual lengthscales 
+                                    lengthscale_constraint=GreaterThan(1e-3),   # constrained lengthscales.
+                                    lengthscale_prior=LogNormalPrior(-2.0, 1.0) # prior
+                                    )
+        else: 
+            matern_kernel = MaternKernel(nu=2.5, 
+                                    ard_num_dims=self.n_params,                
+                                    )
         # obtain output variance
         covar_module = ScaleKernel(matern_kernel)
 
@@ -329,22 +352,32 @@ class BayesianOptimizer(Optimizer):
 
         # deduplicate all three tensors together before fitting:
         self.train_x, self.train_y, self.train_y_var = self.deduplicate_training_data()
-
-        # compute custom likelihood
+        
+        # compute custom likelihood 
         likelihood = FixedNoiseGaussianLikelihood(
-            noise=self.train_y_var.squeeze(),
-            learn_additional_noise=False,  # disable additional noise
+                    noise=self.train_y_var.squeeze(),
+                    learn_additional_noise=False  # disable additional noise
         )
 
         # build GP model
-        self.model = SingleTaskGP(
-            train_X=self.train_x,
-            train_Y=self.train_y,
-            train_Yvar=self.train_y_var,
-            covar_module=covar_module,
-            outcome_transform=Standardize(m=1),  # m = 1 for single outputs
-            likelihood=likelihood,
-        )
+        if self.noise_robust_mode is True: 
+            # create robust model
+            self.model = SingleTaskGP(
+                train_X=self.train_x,
+                train_Y=self.train_y,
+                train_Yvar=self.train_y_var,
+                covar_module=covar_module,
+                outcome_transform=Standardize(m=1),  # m = 1 for single outputs
+                likelihood=likelihood,
+            )
+        else: 
+            # create simple model
+            self.model = SingleTaskGP(
+                train_X=self.train_x,
+                train_Y=self.train_y,
+                covar_module=covar_module,
+                outcome_transform=Standardize(m=1),  # m = 1 for single outputs
+            )
 
         # define the marginal log likelihood
         self.mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
@@ -355,6 +388,8 @@ class BayesianOptimizer(Optimizer):
     def constraint_callable(self, Z: torch.Tensor):
         return Z[..., 1]
 
+
+
     def get_acquisition_function(self):
         """
         Creates the acquisition function (AF) for the BO loop.
@@ -364,66 +399,77 @@ class BayesianOptimizer(Optimizer):
             - acq_func : the acquisition function
         """
 
-        # standardize the best observed value
-        best_f_standardized = (
-            self.best_init_y - self.model.outcome_transform.means.item()
-        ) / self.model.outcome_transform.stdvs.item()
-        # obtain the objective and constraint callables
+        # standardize the best observed value 
+        best_f_standardized = (self.best_init_y - self.model.outcome_transform.means.item()) \
+                       / self.model.outcome_transform.stdvs.item()
+        # obtain the objective and constraint callables 
         objective = GenericMCObjective(objective=self.obj_callable)
 
         # define quasi-MC N(0,1) sampler that uses Sobol sequences
-        qmc_sampler = SobolQMCNormalSampler(sample_shape=torch.Size([self.mc_samples]))
-
+        qmc_sampler = SobolQMCNormalSampler(
+                        sample_shape=torch.Size([self.mc_samples]))
+        
         # transform a model's posterior
-        weights = torch.tensor([1.0])  # add more weights for multi-output objective
+        weights = torch.tensor([1.0])  # add more weights for multi-output objective 
         posterior_transform = ScalarizedPosteriorTransform(weights, offset=0.0)
-
+        
         # add manual pruning of baseline for logNEI
-        X_baseline_pruned = prune_inferior_points(
-            model=self.model,
-            X=self.train_x,
-            objective=objective,
-            posterior_transform=posterior_transform,
-        )
+        X_baseline_pruned = prune_inferior_points(  
+                model=self.model,  
+                X=self.train_x,  
+                objective=objective,  
+                posterior_transform=posterior_transform,  
+        )  
 
         # initialize class for the different AF's
         if self.acq_func_type == "EI":
-            acq_func = qExpectedImprovement(
-                model=self.model, best_f=best_f_standardized
-            )
-        elif self.acq_func_type == "logEI":
-            acq_func = qLogExpectedImprovement(
-                model=self.model,
+                acq_func = qExpectedImprovement(
+                model=self.model, 
+                best_f=best_f_standardized
+        )
+        elif self.acq_func_type == "logEI" and self.noise_robust_mode is True:
+                acq_func = qLogExpectedImprovement(
+                model=self.model, 
                 best_f=best_f_standardized,
                 sampler=qmc_sampler,
                 # objective=objective,
                 # constraints=[self.constraint_callable],
-            )
-
+        )
+        elif self.acq_func_type == "logEI" and self.noise_robust_mode is False:
+                acq_func = qLogExpectedImprovement(
+                model=self.model, 
+                best_f=best_f_standardized,
+        )
+            
         elif self.acq_func_type == "logNEI":
-            acq_func = qLogNoisyExpectedImprovement(
-                model=self.model,
+                acq_func = qLogNoisyExpectedImprovement(
+                model=self.model, 
                 X_baseline=X_baseline_pruned,
                 prune_baseline=True,  # remove redundant baseline points
                 sampler=qmc_sampler,
-                cache_root=True,  # Caches Cholesky decomposition
+                cache_root=True,      # Caches Cholesky decomposition 
                 # objective=objective,
                 # constraints=[self.constraint_callable],
-            )
+        )
         elif self.acq_func_type == "KG":
-            acq_func = qKnowledgeGradient(
-                model=self.model, num_fantasies=self.mc_samples
-            )
-
+                acq_func = qKnowledgeGradient(
+                model=self.model,
+                num_fantasies=self.mc_samples)
+        
         elif self.acq_func_type == "UCB":
-            acq_func = qUpperConfidenceBound(model=self.model, beta=0.05)
+                acq_func = qUpperConfidenceBound(
+                model=self.model, 
+                beta=0.05
+        )
         elif self.acq_func_type == "PI":
-            acq_func = qProbabilityOfImprovement(
-                model=self.model, best_f=best_f_standardized
-            )
+                acq_func = qProbabilityOfImprovement(
+                model=self.model, 
+                best_f=best_f_standardized
+        )
         else:
             raise ValueError("Invalid acquisition function type")
-
+        
+        
         return acq_func
 
     def get_next_points(self):
@@ -440,19 +486,21 @@ class BayesianOptimizer(Optimizer):
         # create the GP models
         self.build_surrogate_model()
 
-        try:  # Attempt to fit the model for hyperparameter optimization
-            fit_gpytorch_mll(self.mll)  # uses L-BFGS-B optimizer
+        try: # Attempt to fit the model for hyperparameter optimization
 
+            fit_gpytorch_mll(self.mll)  # uses L-BFGS-B optimizer
+        
         except ModelFittingError:
             print("L-BFGS-B failed, falling back to Adam...")
-
-            try:
-                fit_gpytorch_mll_torch(self.mll, step_limit=300)
-
-            except Exception as e:
+            
+            try: 
+                fit_gpytorch_mll_torch(self.mll, step_limit=300)             
+            
+            except Exception as e : 
                 print(f"Adam optimizer also failed. {e}")
                 return False, None
-
+            
+            
         except ValueError as ve:
             # handle common data-related errors
             print(f"ValueError during fitting: {ve}")
@@ -463,22 +511,28 @@ class BayesianOptimizer(Optimizer):
             print(f"Unexpected error during model fitting: {e}")
             traceback.print_exc()
             return False, None
-
+        
         # create the acquisition function
         acq_func = self.get_acquisition_function()
 
+        if self.noise_robust_mode is True:
+            raw_samples = 500
+        else: 
+            raw_samples = 1024
+        
         # find candidates ( assuming one optimizer is successful)
         candidates, _ = optimize_acqf(
             acq_function=acq_func,
             bounds=self.unit_bounds,
-            q=1,  # no.of candidates to generate in the batch
-            num_restarts=10,  # no.of starting points for multi-start optimization.
-            raw_samples=500,  # no.of samples for initial condition generation (256 - 1024)
+            q=1,                # no.of candidates to generate in the batch
+            num_restarts=10,    # no.of starting points for multi-start optimization.
+            raw_samples=raw_samples,    # no.of samples for initial condition generation (256 - 1024)
             options={"batch_limit": 5, "maxiter": 200},
         )
 
         return True, candidates
 
+    
     def make_physical_bounds(self):
         """
         Function returns the physical bounds for
@@ -525,9 +579,8 @@ class BayesianOptimizer(Optimizer):
         sampler = LatinHypercube(
             d=self.n_params, seed=seed
         )  # LHS sampler with fixed/None seed
-
-        unit_samples = sampler.random(
-            n=self.n_init
+        
+        unit_samples = sampler.random(n=self.n_init
         )  # shape (n_init, d), values in [0, 1]
 
         #  scale from [0,1] to the actual parameter ranges
@@ -582,36 +635,45 @@ class BayesianOptimizer(Optimizer):
         # x = x_phy.detach().cpu().numpy().astype(np.float32)
 
         return x
-
+    
     def deduplicate_training_data(self):
         """Remove duplicate x points by averaging their y values and variances.
-        Outputs:
+        Outputs: 
             - unique_x : ((n_unique, d) tensor) unique x points
-            - unique_y : ((n_unique, 1) tensor) averaged y values
+            - unique_y : ((n_unique, 1) tensor) averaged y values 
             - unique_y_var : ((n_unique, 1) tensor) averaged y variances
         """
-        unique_x, inverse_idx = torch.unique(self.init_x, dim=0, return_inverse=True)
-
+        unique_x, inverse_idx = torch.unique(self.init_x, dim=0, 
+                                             return_inverse=True)
+        
         n_unique = unique_x.shape[0]
-        unique_y = torch.zeros(n_unique, self.init_y.shape[1], dtype=torch.float64)
-        unique_y_var = torch.zeros(
-            n_unique, self.init_y_var.shape[1], dtype=torch.float64
-        )
-        counts = torch.zeros(n_unique, dtype=torch.float64)
+        unique_y     = torch.zeros(n_unique, self.init_y.shape[1],
+                                   dtype=torch.float64)
+        unique_y_var = torch.zeros(n_unique, self.init_y_var.shape[1], 
+                                   dtype=torch.float64)
+        counts       = torch.zeros(n_unique, dtype=torch.float64)
 
         for i, idx in enumerate(inverse_idx):
-            unique_y[idx] += self.init_y[i]
+            unique_y[idx]     += self.init_y[i]
             unique_y_var[idx] += self.init_y_var[i]
-            counts[idx] += 1
+            counts[idx]       += 1
 
         # average y across duplicates
-        unique_y /= counts.unsqueeze(1)
-
+        unique_y     /= counts.unsqueeze(1)
+        
         # variance of the mean = sum(var_i) / n²
-        unique_y_var /= (counts**2).unsqueeze(1)
+        unique_y_var /= (counts ** 2).unsqueeze(1)
 
         return unique_x, unique_y, unique_y_var
-
+    
+    def get_sim_time(self): 
+        """ Returns the total time taken for the optimization 
+        process so far. 
+        
+        Outputs: 
+            - total_time : total time taken for optimization so far
+        """
+        return self.time_accumulated
 
 register_algorithm(
     "bayesian",
@@ -652,7 +714,7 @@ register_algorithm(
             default=-1,
             step=1,
             tooltip="User defined seed for initial sampling. If -1, do random selection.",
-        ),
+        )
     ],
     spec_cls=BayesianOptimizerOptimizeAlgorithmSpec,
     optimizer_cls=BayesianOptimizer,
