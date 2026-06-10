@@ -79,7 +79,7 @@ class BayesianOptimizer(Optimizer):
         fatol: float,                       # tolerance for change in f(x)
         n_init: int,                        # no.of initial samples to generate
         user_seed: int,                     # user defined seed
-        # robust_mode: bool,                # use simple/robust optimizer
+        robust_mode: bool = True,                # use simple/robust optimizer
     ):
 
         # select the acquisition function type
@@ -129,8 +129,7 @@ class BayesianOptimizer(Optimizer):
         self.z_score = 1.96         # 95% confidence interval
         self.time_accumulated = 0.0 # run time 
         
-        # self.noise_robust_mode = robust_mode   # change to True for real experiment
-        self.noise_robust_mode = False           # default 
+        self.noise_robust_mode = robust_mode   # change to True for real experiment
     
     def ask(self) -> tuple[float, ...]:
         """
