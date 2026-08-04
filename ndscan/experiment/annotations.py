@@ -20,7 +20,14 @@ from ..utils import FIT_OBJECTS
 from .parameters import ParamHandle
 from .result_channels import ResultChannel
 
-__all__ = ["Annotation", "curve_1d", "curve", "computed_curve", "axis_location"]
+__all__ = [
+    "Annotation",
+    "AnnotationValueRef",
+    "curve_1d",
+    "curve",
+    "computed_curve",
+    "axis_location",
+]
 
 
 class AnnotationValueRef:
@@ -137,7 +144,10 @@ class Annotation:
 
 
 def curve(
-    coordinates: dict[ParamHandle | ResultChannel, list[float] | np.ndarray],
+    coordinates: dict[
+        ParamHandle | ResultChannel,
+        list[float] | np.ndarray | AnnotationValueRef | ResultChannel,
+    ],
 ) -> Annotation:
     """Create a curve annotation from a dictionary of coordinate lists.
 
@@ -154,13 +164,16 @@ def curve(
 
     :param coordinates: A dictionary mapping, for each dimension, the axis in question
         (:class:`.ParamHandle`/:class:`.ResultChannel`) to a list of coordinates for
-        each curve point. Each list must have the same length.
+        each curve point, or a reference to one. Literal lists must have the same
+        length; referenced values are resolved later and cannot be checked here.
 
     :return: The :class:`Annotation` object describing the curve.
     """
     num_points = None
 
     def normalise(key, values):
+        if isinstance(values, (AnnotationValueRef, ResultChannel)):
+            return values
         if isinstance(values, np.ndarray):
             values = values.tolist()
         nonlocal num_points
@@ -179,9 +192,9 @@ def curve(
 
 def curve_1d(
     x_axis: ParamHandle,
-    x_values: list[float] | np.ndarray | AnnotationValueRef,
+    x_values: list[float] | np.ndarray | AnnotationValueRef | ResultChannel,
     y_axis: ResultChannel,
-    y_values: list[float] | np.ndarray | AnnotationValueRef,
+    y_values: list[float] | np.ndarray | AnnotationValueRef | ResultChannel,
 ) -> Annotation:
     """Create a curve annotation from explicit lists of x and y coordinates.
 
@@ -196,9 +209,11 @@ def curve_1d(
     efficient to store.
 
     :param x_axis: The parameter corresponding to the x axis of the curve.
-    :param x_values: A list of x coordinates for the curve points.
+    :param x_values: A list of x coordinates for the curve points, or a reference to
+        one.
     :param y_axis: The result channel corresponding to the y axis of the curve.
-    :param y_values: A list of y coordinates for the curve points.
+    :param y_values: A list of y coordinates for the curve points, or a reference to
+        one.
 
     :return: The :class:`Annotation` object describing the curve.
     """
