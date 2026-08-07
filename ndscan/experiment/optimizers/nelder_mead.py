@@ -18,6 +18,7 @@ class NelderMeadOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
     xatol: float = 1e-3
     fatol: float = 1e-3
     simplex_step_fraction: float = 0.5
+    user_seed: int = -1
 
 
 class NelderMeadOptimizer(Optimizer):
@@ -37,6 +38,7 @@ class NelderMeadOptimizer(Optimizer):
         xatol: float,
         fatol: float,
         simplex_step_fraction: float = 0.5,
+        user_seed: int = -1,
     ):
         self._initial = np.array(initial, dtype=float)
         self._lower = np.array(lower_bounds, dtype=float)
@@ -45,7 +47,7 @@ class NelderMeadOptimizer(Optimizer):
         self._xatol = xatol
         self._fatol = fatol
         self._simplex_step_fraction = simplex_step_fraction
-        self._rng = np.random.default_rng()
+        self._rng = np.random.default_rng(None if user_seed < 0 else user_seed)
 
         self._alpha = 1.0
         self._gamma = 2.0
@@ -146,12 +148,17 @@ class NelderMeadOptimizer(Optimizer):
         # Start with the initial point, then add one random point per axis.
         initial = self._clip(self._initial.copy())
         simplex = [initial.copy()]
-        for i in range(len(self._initial)):
+        # Exactly n additional vertices => n + 1 total.
+        for _ in range(len(self._initial)):
             point = initial.copy()
-            point[i] += self._rng.uniform(
-                -self._simplex_step_fraction/2,
-                self._simplex_step_fraction/2,
-            ) * self._span[i]
+            point += (
+                self._rng.uniform(
+                    -self._simplex_step_fraction / 2,
+                    self._simplex_step_fraction / 2,
+                    size=self._initial.shape,
+                )
+                * self._span
+            )
             simplex.append(self._clip(point))
         return simplex
 
@@ -337,6 +344,15 @@ register_algorithm(
             default=0.25,
             step=0.01,
             tooltip="Maximum initial simplex size around the initial point as a fraction of the parameter bounds span.",
+        ),
+        AlgorithmParameter(
+            name="user_seed",
+            label="Random seed",
+            minimum=-1,
+            maximum=2**31 - 1,
+            default=-1,
+            step=1,
+            tooltip="Seed for initial simplex generation. Use -1 for a random seed.",
         ),
     ],
     spec_cls=NelderMeadOptimizeAlgorithmSpec,

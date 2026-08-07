@@ -128,6 +128,7 @@ OPTIMIZER_TEST_CASES = (
     {
         "name": "nelder_mead",
         "make": NelderMeadOptimizer,
+        "kwargs": {"user_seed": 42},
         "std_values": (1.0, 0.0),
         "std_best_value": 0.0,
         "xatol": 1e-2,
@@ -302,6 +303,7 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
                 "kind": algorithm,
                 "xatol": 1e-4,
                 "fatol": 1e-6,
+                "user_seed": 42,
             },
             "max_evals": max_evals,
             "num_repeats_per_point": num_repeats_per_point,
@@ -402,6 +404,7 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
                 "kind": "nelder_mead",
                 "xatol": 1e-4,
                 "fatol": 1e-6,
+                "user_seed": 42,
             },
             "max_evals": 120,
             "skip_on_persistent_transitory_error": False,
