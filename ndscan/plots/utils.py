@@ -507,19 +507,21 @@ def format_label_value(
         return str(parsed_value)
     elif axis_type in ["int", "float"]:
         # Base case: we want to resolve at least milli-units on the data's scale.
-        span = data_to_display_scale
+        span = abs(data_to_display_scale)
         if limits[1] > limits[0]:
             # Preferred case: we want to resolve >1000 points in the displayed range.
-            span *= limits[1] - limits[0]
+            span *= abs(limits[1] - limits[0])
         elif np.abs(parsed_value) > 0:
             # Fallback case: we want to resolve >3 significant figures of the value.
-            span *= parsed_value
-        smallest_digit = np.floor(np.log10(span)) - 3
+            span *= abs(parsed_value)
 
-        if axis_type == "int":
-            smallest_digit = max(smallest_digit, 0)
-
-        precision = int(-smallest_digit) if smallest_digit < 0 else 0
+        if not np.isfinite(span) or span <= 0:
+            precision = 0
+        else:
+            smallest_digit = np.floor(np.log10(span)) - 3
+            if axis_type == "int":
+                smallest_digit = max(smallest_digit, 0)
+            precision = int(-smallest_digit) if smallest_digit < 0 else 0
 
         return "{0:.{n}f}{1}".format(
             parsed_value * data_to_display_scale, unit_suffix, n=precision

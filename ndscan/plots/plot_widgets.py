@@ -20,6 +20,29 @@ from .time_slider import TimeSlider, TimeSliderContainer
 logger = logging.getLogger(__name__)
 
 
+class _ViewBoxWheelEvent:
+    """Adapt a plot-item wheel event to the ViewBox-local event API."""
+
+    def __init__(self, event, view_box):
+        self._event = event
+        pos = view_box.mapFromScene(event.scenePos())
+        if not view_box.boundingRect().contains(pos):
+            pos = view_box.boundingRect().center()
+        self._pos = pos
+
+    def delta(self):
+        return self._event.delta()
+
+    def pos(self):
+        return self._pos
+
+    def accept(self):
+        self._event.accept()
+
+    def ignore(self):
+        self._event.ignore()
+
+
 class LineWrappedAxisItem(pyqtgraph.AxisItem):
     """AxisItem for y axes that line-wraps the label text to fit the pane height, and
     emits an event if the width required to draw ticks/labels without overlap changes.
@@ -139,6 +162,10 @@ class MultiYAxisPlotItem(pyqtgraph.PlotItem):
         self.getViewBox().setBorder(
             pyqtgraph.functions.mkPen(pyqtgraph.getConfigOption("foreground"))
         )
+
+    def wheelEvent(self, event):
+        view_box = self.getViewBox()
+        view_box.wheelEvent(_ViewBoxWheelEvent(event, view_box))
 
     def new_y_axis(self):
         self._num_y_axes += 1
@@ -668,7 +695,7 @@ def add_time_slider(
 def add_source_id_label(
     view_box: pyqtgraph.ViewBox, context: Context
 ) -> pyqtgraph.TextItem:
-    """Add a translucent TextItem pinned to the bottom left of the view box displaying
+    """Add a high-contrast TextItem pinned to the bottom left of the view box displaying
     the context source id string.
     """
 
@@ -685,10 +712,10 @@ def add_source_id_label(
             return self.setPos(xmin, ymin)
 
     text_item = SourceIdTextItem(
-        text="", anchor=(0, 1), color=(255, 255, 255), fill=(0, 0, 0)
+        text="", anchor=(0, 1), color=(0, 0, 0), fill=(255, 255, 255, 220)
     )
     text_item.setZValue(1000)
-    text_item.setOpacity(0.3)
+    text_item.setOpacity(1.0)
     view_box.addItem(text_item, ignoreBounds=True)
 
     context.source_id_changed.connect(text_item.setText)
