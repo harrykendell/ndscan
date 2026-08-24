@@ -64,4 +64,4 @@ _fmt-test = "ruff format --check examples ndscan test"
 fmt-test.sequence = ["_fmt-test-imports", "_fmt-test"]
 
 lint = "ruff check examples ndscan test"
-test = "python -m unittest discover -v test"
+test = "./run_tests.sh"
