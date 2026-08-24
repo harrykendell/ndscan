@@ -5,15 +5,17 @@ argument editor (as mirrored by ndscan.experiment.scan_generator).
 """
 
 import logging
+import math
 from collections import OrderedDict
 from enum import Enum, unique
-from typing import Any
+from typing import Any, Optional
 
 from artiq.gui.scientific_spinbox import ScientificSpinBox
 from artiq.gui.tools import disable_scroll_wheel
 from sipyco import pyon
 
 from .._qt import QtCore, QtGui, QtWidgets
+from ..utils import eval_param_default
 from .utils import format_override_identity, load_icon_cached
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 def parse_list_pyon(values: str) -> list[float]:
     return pyon.decode("[" + values + "]")
+
+
+def _raise_missing_default_dataset(key, default=None):
+    raise KeyError(key)
 
 
 def make_divider():
@@ -44,6 +50,7 @@ class SyncValue(Enum):
     centre = "centre"
     lower = "lower"
     upper = "upper"
+    initial = "initial"
     num_points = "num_points"
 
 
@@ -172,6 +179,92 @@ class NumericScanOption(ScanOption):
             box.setSuffix(" " + unit)
         return box
 
+    def _default_numeric_spec_value(self, key: str, fallback: float = 0.0) -> float:
+        value = self.schema.get("spec", {}).get(key)
+        if value is None:
+            return fallback
+        if isinstance(value, (int, float)) and not math.isfinite(value):
+            return fallback
+        return float(value)
+
+    def _default_numeric_step_value(self, fallback: float = 1.0) -> float:
+        value = self.schema.get("spec", {}).get("step")
+        if value is None:
+            return fallback
+        value = float(value)
+        if not math.isfinite(value) or value <= 0.0:
+            return fallback
+        return value
+
+    def _default_numeric_param_value(self) -> Optional[float]:
+        try:
+            return float(
+                eval_param_default(
+                    self.schema["default"],
+                    _raise_missing_default_dataset,
+                )
+            )
+        except Exception:
+            return None
+
+    def _default_numeric_centre_value(self, fallback: float = 0.0) -> float:
+        value = self._default_numeric_param_value()
+        if value is None or not math.isfinite(value):
+            return fallback
+        return value
+
+    def _default_numeric_range_values(self) -> tuple[float, float]:
+        lower = self.schema.get("spec", {}).get("min")
+        upper = self.schema.get("spec", {}).get("max")
+        if isinstance(lower, (int, float)) and not math.isfinite(lower):
+            lower = None
+        if isinstance(upper, (int, float)) and not math.isfinite(upper):
+            upper = None
+
+        centre = self._default_numeric_param_value()
+        step = self._default_numeric_step_value()
+
+        if lower is not None:
+            lower = float(lower)
+        if upper is not None:
+            upper = float(upper)
+
+        if lower is None and upper is None:
+            if centre is None:
+                return 0.0, step
+            return centre - step, centre + step
+
+        if lower is None:
+            lower = upper - step if centre is None else min(centre - step, upper)
+        if upper is None:
+            upper = lower + step if centre is None else max(centre + step, lower)
+
+        if upper < lower:
+            lower, upper = upper, lower
+        if upper == lower:
+            upper = lower + step
+        return lower, upper
+
+    def _default_numeric_half_span_value(self) -> float:
+        lower, upper = self._default_numeric_range_values()
+        centre = self._default_numeric_centre_value((lower + upper) / 2.0)
+
+        half_span = min(max(centre - lower, 0.0), max(upper - centre, 0.0))
+        if half_span > 0.0:
+            return half_span
+
+        half_span = abs(upper - lower) / 2.0
+        if half_span > 0.0:
+            return half_span
+        return self._default_numeric_step_value()
+
+    def _current_numeric_sync_value(self, sync_values: dict) -> Optional[float]:
+        if SyncValue.initial in sync_values:
+            return sync_values[SyncValue.initial]
+        if SyncValue.centre in sync_values:
+            return sync_values[SyncValue.centre]
+        return None
+
 
 class FixedScanOption(NumericScanOption):
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
@@ -189,10 +282,12 @@ class FixedScanOption(NumericScanOption):
         self.box.setValue(float(value) / self.scale)
 
     def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box.setValue(sync_values[SyncValue.centre])
+        value = self._current_numeric_sync_value(sync_values)
+        if value is not None:
+            self.box.setValue(value)
 
     def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.initial] = self.box.value()
         sync_values[SyncValue.centre] = self.box.value()
 
 
@@ -264,30 +359,38 @@ class MinMaxScanOption(RangeScanOption):
         layout.addWidget(self.box_stop)
         layout.setStretchFactor(self.box_stop, 1)
 
+        lower, upper = self._default_numeric_range_values()
+        self.box_start.setValue(lower / self.scale)
+        self.box_stop.setValue(upper / self.scale)
+
     def read_sync_values(self, sync_values: dict) -> None:
+        lower, upper = self._default_numeric_range_values()
         if SyncValue.lower in sync_values:
             self.box_start.setValue(sync_values[SyncValue.lower])
+        else:
+            self.box_start.setValue(lower / self.scale)
         if SyncValue.upper in sync_values:
             self.box_stop.setValue(sync_values[SyncValue.upper])
+        else:
+            self.box_stop.setValue(upper / self.scale)
         if SyncValue.num_points in sync_values:
             self.box_points.setValue(sync_values[SyncValue.num_points])
 
     def write_sync_values(self, sync_values: dict) -> None:
-        sync_values[SyncValue.lower] = self.box_start.value()
-        sync_values[SyncValue.upper] = self.box_stop.value()
         sync_values[SyncValue.num_points] = self.box_points.value()
 
     def attempt_read_from_axis(self, axis: dict) -> bool:
+        lower, upper = self._default_numeric_range_values()
         if axis["type"] == "refining":
             self.check_infinite.setChecked(True)
-            self.box_start.setValue(axis["range"].get("lower", 0.0) / self.scale)
-            self.box_stop.setValue(axis["range"].get("upper", 0.0) / self.scale)
+            self.box_start.setValue(axis["range"].get("lower", lower) / self.scale)
+            self.box_stop.setValue(axis["range"].get("upper", upper) / self.scale)
             self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
             return True
         if axis["type"] == "linear":
             self.check_infinite.setChecked(False)
-            self.box_start.setValue(axis["range"].get("start", 0.0) / self.scale)
-            self.box_stop.setValue(axis["range"].get("stop", 0.0) / self.scale)
+            self.box_start.setValue(axis["range"].get("start", lower) / self.scale)
+            self.box_stop.setValue(axis["range"].get("stop", upper) / self.scale)
             self.box_points.setValue(axis["range"].get("num_points", 21))
             self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
             return True
@@ -329,13 +432,26 @@ class CentreSpanScanOption(RangeScanOption):
 
         self._build_points_ui(layout)
 
+        self.box_centre.setValue(self._default_numeric_centre_value() / self.scale)
+        self.box_half_span.setValue(
+            self._default_numeric_half_span_value() / self.scale
+        )
+
     def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box_centre.setValue(sync_values[SyncValue.centre])
+        value = self._current_numeric_sync_value(sync_values)
+        self.box_centre.setValue(
+            (self._default_numeric_centre_value() / self.scale)
+            if value is None
+            else value
+        )
+        self.box_half_span.setValue(
+            self._default_numeric_half_span_value() / self.scale
+        )
         if SyncValue.num_points in sync_values:
             self.box_points.setValue(sync_values[SyncValue.num_points])
 
     def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.initial] = self.box_centre.value()
         sync_values[SyncValue.centre] = self.box_centre.value()
         sync_values[SyncValue.num_points] = self.box_points.value()
 
@@ -348,8 +464,14 @@ class CentreSpanScanOption(RangeScanOption):
             return False
 
         # Common to both finite/refining:
-        self.box_half_span.setValue((axis["range"].get("half_span", 0.0) / self.scale))
-        self.box_centre.setValue((axis["range"].get("centre", 0.0) / self.scale))
+        self.box_half_span.setValue(
+            axis["range"].get("half_span", self._default_numeric_half_span_value())
+            / self.scale
+        )
+        self.box_centre.setValue(
+            axis["range"].get("centre", self._default_numeric_centre_value())
+            / self.scale
+        )
         self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
         return True
 
@@ -388,6 +510,9 @@ class ExpandingScanOption(NumericScanOption):
         layout.addWidget(self.box_spacing)
         layout.setStretchFactor(self.box_spacing, 1)
 
+        self.box_centre.setValue(self._default_numeric_centre_value() / self.scale)
+        self.box_spacing.setValue(self._default_numeric_step_value() / self.scale)
+
     def write_to_params(self, params: dict) -> None:
         schema = self.schema
         spec = {
@@ -405,17 +530,28 @@ class ExpandingScanOption(NumericScanOption):
         params["scan"].setdefault("axes", []).append(spec)
 
     def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box_centre.setValue(sync_values[SyncValue.centre])
+        value = self._current_numeric_sync_value(sync_values)
+        self.box_centre.setValue(
+            (self._default_numeric_centre_value() / self.scale)
+            if value is None
+            else value
+        )
 
     def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.initial] = self.box_centre.value()
         sync_values[SyncValue.centre] = self.box_centre.value()
 
     def attempt_read_from_axis(self, axis: dict) -> bool:
         if axis["type"] != "expanding":
             return False
-        self.box_centre.setValue(axis["range"].get("centre", 0.0) / self.scale)
-        self.box_spacing.setValue(axis["range"].get("spacing", 0.0) / self.scale)
+        self.box_centre.setValue(
+            axis["range"].get("centre", self._default_numeric_centre_value())
+            / self.scale
+        )
+        self.box_spacing.setValue(
+            axis["range"].get("spacing", self._default_numeric_step_value())
+            / self.scale
+        )
         self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
         return True
 
