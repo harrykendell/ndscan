@@ -397,15 +397,15 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         )
         load_hdf5.clicked.connect(dock._load_hdf5_clicked)
 
-        disable_scans = QtWidgets.QPushButton("Disable all scans")
-        disable_scans.setIcon(self._disable_scans_icon)
-        disable_scans.clicked.connect(self.disable_all_scans)
-        disable_scans.setShortcut("Ctrl+R")
+        self._disable_scans_button = QtWidgets.QPushButton("Disable all scans")
+        self._disable_scans_button.setIcon(self._disable_scans_icon)
+        self._disable_scans_button.clicked.connect(self.disable_all_scans)
+        self._disable_scans_button.setShortcut("Ctrl+R")
 
         buttons = LayoutWidget()
         buttons.addWidget(recompute_arguments, col=1)
         buttons.addWidget(load_hdf5, col=2)
-        buttons.addWidget(disable_scans, col=3)
+        buttons.addWidget(self._disable_scans_button, col=3)
         buttons.layout.setColumnStretch(0, 1)
         buttons.layout.setColumnStretch(1, 0)
         buttons.layout.setColumnStretch(2, 0)
@@ -413,6 +413,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         buttons.layout.setColumnStretch(4, 1)
         buttons.layout.setContentsMargins(3, 6, 3, 6)
         self.setItemWidget(buttons_item, 0, buttons)
+        self._update_disable_scans_button()
 
     def save_state(self):
         expanded = []
@@ -837,7 +838,28 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         _set_execution_option_rows_visible(
             self._scan_option_items, self._optimise_option_items, mode
         )
+        self._update_disable_scans_button(mode)
         self._set_save_timer()
+
+    def _update_disable_scans_button(self, mode: str | None = None) -> None:
+        if not hasattr(self, "_disable_scans_button"):
+            return
+        if mode is None:
+            mode = (
+                self.execution_mode_selector.current_mode()
+                if self.execution_mode_selector is not None
+                else ExecutionMode.scan.name
+            )
+        if mode == ExecutionMode.optimise.name:
+            self._disable_scans_button.setText("Disable all optimisations")
+            self._disable_scans_button.setToolTip(
+                "Reset all optimisation parameters to fixed values"
+            )
+        else:
+            self._disable_scans_button.setText("Disable all scans")
+            self._disable_scans_button.setToolTip(
+                "Reset all scan parameters to fixed values"
+            )
 
     def _save_to_argument(self):
         # Stop timer if it is still running.
