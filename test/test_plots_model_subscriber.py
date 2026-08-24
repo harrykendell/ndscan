@@ -4,7 +4,8 @@ import unittest
 from sipyco.sync_struct import Notifier
 
 from ndscan.plots.model import Context
-from ndscan.plots.model.subscriber import SubscriberRoot
+from ndscan.plots.model.history import HistoryFromScanModel
+from ndscan.plots.model.subscriber import SubscriberRoot, SubscriberScanModel
 from ndscan.utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 
@@ -112,3 +113,17 @@ class SinglePointTest(unittest.TestCase):
         self.datasets["ndscan.completed"] = (False, True, {})
         self.init()
         self.assertEqual(self.root.get_model().get_point(), {"foo": 42, "bar": 23})
+
+
+class ScanExecutionModeTest(unittest.TestCase):
+    def test_history_proxy_preserves_execution_mode(self):
+        model = SubscriberScanModel(
+            [{"param": {"description": "x"}, "path": "*"}],
+            "ndscan.",
+            SCHEMA_REVISION,
+            Context(),
+            "optimise",
+        )
+
+        self.assertEqual(model.execution_mode, "optimise")
+        self.assertEqual(HistoryFromScanModel(model).execution_mode, "optimise")

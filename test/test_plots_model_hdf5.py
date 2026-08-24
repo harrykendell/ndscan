@@ -43,6 +43,7 @@ class HDF5ScanModelTest(unittest.TestCase):
         the types seen in live (subscriber) plots (h5py returns bytes by default)."""
         file = make_in_memory_file()
         file["ndscan." + SCHEMA_REVISION_KEY] = SCHEMA_REVISION
+        file["ndscan.execution_mode"] = "optimise"
         file["ndscan.axes"] = json.dumps([ENUM_AXIS])
         file["ndscan.channels"] = json.dumps(
             {"value": FLOAT_CHANNEL, "spec": SUBSCAN_CHANNEL}
@@ -62,6 +63,21 @@ class HDF5ScanModelTest(unittest.TestCase):
         self.assertEqual(list(data["channel_value"]), [0.1, 0.2])
         self.assertEqual(list(data["channel_spec"]), ["{}", "{}"])
         self.assertEqual(model.get_analysis_result_source("message").get(), "all fine")
+        self.assertEqual(model.execution_mode, "optimise")
+
+    def test_missing_execution_mode_defaults_to_scan(self):
+        file = make_in_memory_file()
+        file["ndscan." + SCHEMA_REVISION_KEY] = SCHEMA_REVISION
+        file["ndscan.axes"] = json.dumps([ENUM_AXIS])
+        file["ndscan.channels"] = json.dumps({"value": FLOAT_CHANNEL})
+        file["ndscan.online_analyses"] = json.dumps({})
+        file["ndscan.annotations"] = json.dumps([])
+        file["ndscan.points.axis_0"] = ["foo"]
+        file["ndscan.points.channel_value"] = [0.1]
+
+        model = HDF5Root(file, "ndscan.", Context(), "test").get_model()
+
+        self.assertEqual(model.execution_mode, "scan")
 
 
 class HDF5SingleShotModelTest(unittest.TestCase):
