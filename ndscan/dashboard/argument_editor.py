@@ -12,9 +12,12 @@ from sipyco import pyon
 from .._qt import QtCore, QtGui, QtWidgets
 from ..utils import (
     PARAMS_ARG_KEY,
+    ExecutionMode,
     NoAxesMode,
+    merge_ndscan_params,
     shorten_to_unambiguous_suffixes,
 )
+from .optimise_options import ExecutionModeSelector, OptimiseAxisOption, OptimiseOptions
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
 from .scan_options import list_scan_option_types
 from .utils import (
@@ -45,7 +48,8 @@ def _try_extract_ndscan_params(
         return None, arguments
 
     state = arg.get("state", None)
-    params = pyon.decode(state if state else arg["desc"]["default"])
+    defaults = pyon.decode(arg["desc"]["default"])
+    params = merge_ndscan_params(defaults, pyon.decode(state) if state else None)
     vanilla_args = arguments.copy()
     del vanilla_args[PARAMS_ARG_KEY]
     return params, vanilla_args
@@ -61,6 +65,19 @@ def _update_ndscan_params(arguments, params):
 # data, to where it would be more practical to just schedule multiple experiments if for
 # whatever reason more repeats were required.
 NUM_REPEATS_INFINITE = 2**31 - 1
+
+
+def _set_execution_option_rows_visible(
+    scan_items: list[QtWidgets.QTreeWidgetItem],
+    optimise_items: list[QtWidgets.QTreeWidgetItem],
+    mode: str,
+) -> None:
+    """Show only the global option rows for the selected execution mode."""
+    is_scan = mode == ExecutionMode.scan.name
+    for item in scan_items:
+        item.setHidden(not is_scan)
+    for item in optimise_items:
+        item.setHidden(is_scan)
 
 
 class ScanOptions:
@@ -296,8 +313,20 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             self._build_shortened_fqns()
 
             self.scan_options = None
+            self.optimise_options = None
+            self.execution_mode_selector = None
+            self._scan_option_items = []
+            self._optimise_option_items = []
             if "scan" in ndscan_params:
                 self.scan_options = ScanOptions(ndscan_params["scan"])
+                self.optimise_options = OptimiseOptions(ndscan_params)
+                self.execution_mode_selector = ExecutionModeSelector(
+                    ndscan_params.get("execution_mode", ExecutionMode.scan.name)
+                )
+                self.execution_mode_selector.mode_changed.connect(
+                    self._execution_mode_changed
+                )
+                self.optimise_options.connect_change_signal(self._set_save_timer)
 
             for fqn, path in ndscan_params["always_shown"]:
                 self._append_param_items(fqn, path, True)
@@ -313,6 +342,9 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             for ax in ndscan_params.get("scan", {}).get("axes", []):
                 self._append_override_item(ax["fqn"], ax["path"])
 
+            for parameter in ndscan_params.get("optimise", {}).get("parameters", []):
+                self._append_override_item(parameter["fqn"], parameter["path"])
+
             for fqn, overrides in ndscan_params["overrides"].items():
                 for o in overrides:
                     self._append_override_item(fqn, o["path"])
@@ -320,13 +352,25 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             self._append_line_separator()
 
             if self.scan_options:
-                scan_options_group = self._make_group_header_item("Scan options")
+                scan_options_group = self._make_group_header_item("Execution options")
                 self.addTopLevelItem(scan_options_group)
+                mode_item = QtWidgets.QTreeWidgetItem()
+                scan_options_group.addChild(mode_item)
+                self.setItemWidget(mode_item, 1, self.execution_mode_selector)
                 for widget in self.scan_options.get_widgets():
                     twi = QtWidgets.QTreeWidgetItem()
                     scan_options_group.addChild(twi)
                     self.setItemWidget(twi, 1, widget)
+                    self._scan_option_items.append(twi)
+                for widget in self.optimise_options.get_widgets():
+                    twi = QtWidgets.QTreeWidgetItem()
+                    scan_options_group.addChild(twi)
+                    self.setItemWidget(twi, 1, widget)
+                    self._optimise_option_items.append(twi)
                 scan_options_group.setExpanded(True)
+                self._execution_mode_changed(
+                    self.execution_mode_selector.current_mode()
+                )
 
         buttons_item = QtWidgets.QTreeWidgetItem()
         self.addTopLevelItem(buttons_item)
@@ -469,6 +513,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         self.setItemWidget(main_item, 0, label_container)
 
         entry = self._make_override_entry(fqn, path)
+        if self.execution_mode_selector is not None:
+            entry.set_execution_mode(self.execution_mode_selector.current_mode())
         entry.read_from_params(self._ndscan_params, self.manager.datasets)
         entry.layout.setContentsMargins(3, 1, 3, 6)
 
@@ -579,6 +625,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         return wi
 
     def _append_override_item(self, fqn, path):
+        if (fqn, path) in self._override_items:
+            return
         items = self._append_param_items(
             fqn, path, False, self.indexOfTopLevelItem(self._override_prompt_item)
         )
@@ -773,23 +821,40 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
     def _set_save_timer(self):
         self._save_timer.start(500)
 
+    def _execution_mode_changed(self, mode: str) -> None:
+        for entry in self._param_entries.values():
+            entry.set_execution_mode(mode)
+        _set_execution_option_rows_visible(
+            self._scan_option_items, self._optimise_option_items, mode
+        )
+        self._set_save_timer()
+
     def _save_to_argument(self):
         # Stop timer if it is still running.
         self._save_timer.stop()
 
         # Reset previous overrides/scan axes, repopulate with currently active ones.
         self._ndscan_params.setdefault("scan", {})["axes"] = []
+        self._ndscan_params.setdefault("optimise", {})["parameters"] = []
         self._ndscan_params["overrides"] = {}
+        execution_mode = (
+            self.execution_mode_selector.current_mode()
+            if self.execution_mode_selector is not None
+            else ExecutionMode.scan.name
+        )
         for item in self._param_entries.values():
-            item.write_to_params(self._ndscan_params)
+            item.write_to_params(self._ndscan_params, execution_mode)
 
         if self.scan_options is None:
             # Not actually a scannable experiment – delete the scan metadata key, which
             # we've set above to keep code straightforward.
             del self._ndscan_params["scan"]
+            self._ndscan_params.pop("optimise", None)
+            self._ndscan_params.pop("execution_mode", None)
         else:
-            # Store scan parameters.
+            self._ndscan_params["execution_mode"] = execution_mode
             self.scan_options.write_to_params(self._ndscan_params)
+            self.optimise_options.write_to_params(self._ndscan_params)
 
         _update_ndscan_params(self._arguments, self._ndscan_params)
 
@@ -800,6 +865,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             "is_scannable", True
         )
         options = list_scan_option_types(schema["type"], is_scannable)
+        if is_scannable and schema["type"] == "float":
+            options["Optimise"] = OptimiseAxisOption
         return OverrideEntry(options, schema, path)
 
     def apply_color(self, *args, **kwargs):
@@ -830,10 +897,15 @@ class OverrideEntry(LayoutWidget):
             self.scan_type.setEnabled(False)
         self.current_option_idx = 0
 
+        self._option_names = list(option_classes)
+        self._visible_option_indices = []
+        self._execution_mode = ExecutionMode.scan.name
+        self._selected_option_by_mode = {
+            ExecutionMode.scan.name: 0,
+            ExecutionMode.optimise.name: 0,
+        }
         self.options = []
         for name, option_cls in option_classes.items():
-            self.scan_type.addItem(name)
-
             option = option_cls(self.schema, self.path)
             option.value_changed.connect(self.value_changed)
             container = QtWidgets.QWidget()
@@ -845,23 +917,56 @@ class OverrideEntry(LayoutWidget):
 
             self.widget_stack.addWidget(container)
             self.options.append(option)
-        self.scan_type.currentIndexChanged.connect(self._current_index_changed)
+        self.scan_type.currentIndexChanged.connect(self._visible_index_changed)
         self.addWidget(self.widget_stack, col=1)
         self.sync_values = {}
+        self.set_execution_mode(self._execution_mode)
+
+    def set_execution_mode(self, mode: str) -> None:
+        self._selected_option_by_mode[self._execution_mode] = self.current_option_idx
+        self._execution_mode = mode
+        self._visible_option_indices = [0]
+        for index, option in enumerate(self.options[1:], start=1):
+            is_optimise = isinstance(option, OptimiseAxisOption)
+            if is_optimise == (mode == ExecutionMode.optimise.name):
+                self._visible_option_indices.append(index)
+
+        target = self._selected_option_by_mode.get(mode, 0)
+        if target not in self._visible_option_indices:
+            target = 0
+        with QtCore.QSignalBlocker(self.scan_type):
+            self.scan_type.clear()
+            for index in self._visible_option_indices:
+                self.scan_type.addItem(self._option_names[index])
+            self.scan_type.setCurrentIndex(self._visible_option_indices.index(target))
+        self._select_option(target)
+        self.scan_type.setEnabled(len(self._visible_option_indices) > 1)
 
     def read_from_params(self, params: dict, manager_datasets) -> None:
         id_for_log = format_override_identity(self.schema["fqn"], self.path)
 
-        # Check if this parameter is part of the scan axes
-        for axis in params.get("scan", {}).get("axes", []):
-            if axis["fqn"] == self.schema["fqn"] and axis["path"] == self.path:
-                for idx, option in enumerate(self.options):
-                    if option.attempt_read_from_axis(axis):
-                        self.current_option_idx = idx
-                        self._current_index_changed(idx)
-                        self.scan_type.setCurrentIndex(idx)
-                        return
-                logger.warning(f"Failed to read scan params for {id_for_log}")
+        if self._execution_mode == ExecutionMode.scan.name:
+            for axis in params.get("scan", {}).get("axes", []):
+                if axis["fqn"] == self.schema["fqn"] and axis["path"] == self.path:
+                    for idx, option in enumerate(self.options):
+                        if option.attempt_read_from_axis(axis):
+                            self._select_option(idx)
+                            return
+                    logger.warning(f"Failed to read scan params for {id_for_log}")
+        else:
+            for parameter in params.get("optimise", {}).get("parameters", []):
+                if (
+                    parameter["fqn"] == self.schema["fqn"]
+                    and parameter["path"] == self.path
+                ):
+                    for idx, option in enumerate(self.options):
+                        attempt = getattr(
+                            option, "attempt_read_from_optimise_parameter", None
+                        )
+                        if attempt is not None and attempt(parameter):
+                            self._select_option(idx)
+                            return
+                    logger.warning(f"Failed to read optimise params for {id_for_log}")
 
         for o in params.get("overrides", {}).get(self.schema["fqn"], []):
             if o["path"] == self.path:
@@ -882,18 +987,30 @@ class OverrideEntry(LayoutWidget):
         self._set_fixed_value(value)
         self.disable_scan()
 
-    def write_to_params(self, params: dict) -> None:
-        self.options[self.scan_type.currentIndex()].write_to_params(params)
+    def write_to_params(self, params: dict, execution_mode: str) -> None:
+        if execution_mode == self._execution_mode:
+            self.options[self.current_option_idx].write_to_params(params)
 
     def disable_scan(self) -> None:
-        self.scan_type.setCurrentIndex(0)
+        self._select_option(0)
 
     def _set_fixed_value(self, value) -> None:
         self.options[0].set_value(value)
         self.options[0].write_sync_values(self.sync_values)
 
-    def _current_index_changed(self, new_idx) -> None:
+    def _visible_index_changed(self, visible_idx: int) -> None:
+        if visible_idx < 0:
+            return
+        self._select_option(self._visible_option_indices[visible_idx])
+
+    def _select_option(self, new_idx: int) -> None:
         self.options[self.current_option_idx].write_sync_values(self.sync_values)
         self.options[new_idx].read_sync_values(self.sync_values)
         self.widget_stack.setCurrentIndex(new_idx)
         self.current_option_idx = new_idx
+        self._selected_option_by_mode[self._execution_mode] = new_idx
+        if new_idx in self._visible_option_indices:
+            with QtCore.QSignalBlocker(self.scan_type):
+                self.scan_type.setCurrentIndex(
+                    self._visible_option_indices.index(new_idx)
+                )

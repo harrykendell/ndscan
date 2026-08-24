@@ -47,6 +47,12 @@ SCHEMA_REVISION_KEY = "ndscan_schema_revision"
 
 
 @unique
+class ExecutionMode(Enum):
+    scan = "Scan"
+    optimise = "Optimise"
+
+
+@unique
 class NoAxesMode(Enum):
     """Behaviours when launching an experiment with no parameter to be scanned."""
 
@@ -65,6 +71,41 @@ def strip_suffix(string: str, suffix: str) -> str:
     if string.endswith(suffix):
         return string[: -len(suffix)]
     return string
+
+
+def merge_ndscan_params(
+    default_params: dict[str, Any], state_params: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Merge persisted ndscan state with the current argument defaults.
+
+    Nested scan, optimisation objective, and optimisation algorithm settings are
+    merged independently so newly introduced settings receive their current defaults
+    without discarding compatible saved state.
+    """
+    state = state_params if isinstance(state_params, dict) else {}
+    params = default_params.copy()
+
+    for key in ("execution_mode", "overrides"):
+        if key in state:
+            params[key] = state[key]
+
+    if "scan" in default_params:
+        scan = default_params["scan"].copy()
+        scan.update(state.get("scan") or {})
+        params["scan"] = scan
+
+    if "optimise" in default_params:
+        optimise = default_params["optimise"].copy()
+        saved_optimise = state.get("optimise") or {}
+        optimise.update(saved_optimise)
+
+        for key in ("objective", "algorithm"):
+            nested = default_params["optimise"].get(key, {}).copy()
+            nested.update(saved_optimise.get(key) or {})
+            optimise[key] = nested
+        params["optimise"] = optimise
+
+    return params
 
 
 T = TypeVar("T")
