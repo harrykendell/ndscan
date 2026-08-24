@@ -20,8 +20,11 @@
         format = "pyproject";
         propagatedBuildInputs = with nixpkgs.python3Packages; [
           h5py
+          botorch
+          gpytorch
           scipy
           statsmodels
+          torch
           nixpkgs.python3Packages.poetry-core
           nixpkgs.python3Packages.poetry-dynamic-versioning
         ];

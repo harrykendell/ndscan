@@ -11,6 +11,7 @@ from .base import (
     OptimizeSpec,
     build_algorithm_spec,
 )
+from .bayesian import BayesianOptimizer, BayesianOptimizerOptimizeAlgorithmSpec
 from .coordinate_search import (
     CoordinateSearchOptimizeAlgorithmSpec,
     CoordinateSearchOptimizer,
@@ -20,6 +21,8 @@ from .nelder_mead import NelderMeadOptimizeAlgorithmSpec, NelderMeadOptimizer
 __all__ = [
     "ALGORITHM_REGISTRY",
     "AlgorithmParameter",
+    "BayesianOptimizer",
+    "BayesianOptimizerOptimizeAlgorithmSpec",
     "CoordinateSearchOptimizeAlgorithmSpec",
     "CoordinateSearchOptimizer",
     "NelderMeadOptimizeAlgorithmSpec",

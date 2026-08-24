@@ -13,13 +13,17 @@ license = "LGPL-3.0-or-later"
 # way the dependencies are specified here.
 dependencies = [
     "artiq>=8.0.dev0",
+    "botorch",
+    "gpytorch",
     "h5py>=3.8.0",
     "numpy>=1.24",
     "oitg",
     "pyqt6>=6.5.2",
     "pyqtgraph>=0.13.3",
     "qasync>=0.28.0",
+    "scipy",
     "sipyco",
+    "torch",
 ]
 
 [project.scripts]
