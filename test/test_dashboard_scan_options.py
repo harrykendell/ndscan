@@ -6,6 +6,7 @@ from ndscan.dashboard.scan_options import (
     FixedScanOption,
     NumericScanOption,
     SyncValue,
+    list_scan_option_types,
 )
 
 
@@ -69,6 +70,19 @@ class NumericDefaultsTest(unittest.TestCase):
         self.assertEqual(centred.box_centre.value(), 4.0)
         self.assertEqual(centred.box_half_span.value(), 5.0)
 
+
+class ScanOptionTooltipTest(unittest.TestCase):
+    def test_all_current_upstream_option_types_have_explanatory_tooltips(self):
+        for schema_type in ("string", "bool", "enum", "float"):
+            with self.subTest(schema_type=schema_type):
+                options = list_scan_option_types(schema_type, True)
+                self.assertTrue(options)
+                self.assertTrue(
+                    all(option.option_tooltip for option in options.values())
+                )
+
+
+class OptimiseAxisDefaultsTest(unittest.TestCase):
     def test_optimise_axis_uses_parameter_default_as_initial_value(self):
         option = OptimiseAxisOption(_schema("6.0", min=0.0, max=10.0), "*")
         option.box_min = _ValueBox()

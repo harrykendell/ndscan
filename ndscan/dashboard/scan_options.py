@@ -61,6 +61,7 @@ class ScanOption(QtCore.QObject):
     """
 
     value_changed = QtCore.pyqtSignal()
+    option_tooltip = ""
 
     def __init__(self, schema: dict[str, Any], path: str):
         super().__init__()
@@ -92,8 +93,11 @@ class ScanOption(QtCore.QObject):
 
 
 class StringFixedScanOption(ScanOption):
+    option_tooltip = "Hold this parameter fixed at a string value."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box = QtWidgets.QLineEdit()
+        self.box.setToolTip("Fixed string value")
         layout.addWidget(self.box)
 
     def write_to_params(self, params: dict) -> None:
@@ -105,8 +109,11 @@ class StringFixedScanOption(ScanOption):
 
 
 class BoolFixedScanOption(ScanOption):
+    option_tooltip = "Hold this parameter fixed at a boolean value."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box = QtWidgets.QCheckBox()
+        self.box.setToolTip("Fixed boolean value")
         layout.addWidget(self.box)
 
     def write_to_params(self, params: dict) -> None:
@@ -118,11 +125,14 @@ class BoolFixedScanOption(ScanOption):
 
 
 class EnumFixedScanOption(ScanOption):
+    option_tooltip = "Hold this parameter fixed at one enum member."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box = QtWidgets.QComboBox()
         self._members = self.schema["spec"]["members"]
         self._member_values_to_keys = {val: key for key, val in self._members.items()}
         self.box.addItems(self._members.values())
+        self.box.setToolTip("Fixed enum value")
         layout.addWidget(self.box)
 
     def write_to_params(self, params: dict) -> None:
@@ -267,8 +277,11 @@ class NumericScanOption(ScanOption):
 
 
 class FixedScanOption(NumericScanOption):
+    option_tooltip = "Hold this parameter fixed at a single value."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box = self._make_spin_box()
+        self.box.setToolTip("Fixed parameter value")
         layout.addWidget(self.box)
 
     def write_to_params(self, params: dict) -> None:
@@ -312,6 +325,9 @@ class RangeScanOption(NumericScanOption):
         self.box_points = QtWidgets.QSpinBox()
         self.box_points.setMinimum(2)
         self.box_points.setValue(21)
+        self.box_points.setToolTip(
+            "Number of points in the finite scan grid when infinite refinement is off"
+        )
 
         # Somewhat gratuitously restrict the number of scan points for sizing, and to
         # avoid the user accidentally pasting in millions of points, etc.
@@ -344,8 +360,14 @@ class RangeScanOption(NumericScanOption):
 
 
 class MinMaxScanOption(RangeScanOption):
+    option_tooltip = (
+        "Scan between lower and upper bounds on either a finite linear grid or an "
+        "infinitely refining grid."
+    )
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box_start = self._make_spin_box()
+        self.box_start.setToolTip("Lower bound or start value")
         layout.addWidget(self.box_start)
         layout.setStretchFactor(self.box_start, 1)
 
@@ -356,6 +378,7 @@ class MinMaxScanOption(RangeScanOption):
         layout.addWidget(make_divider())
 
         self.box_stop = self._make_spin_box()
+        self.box_stop.setToolTip("Upper bound or stop value")
         layout.addWidget(self.box_stop)
         layout.setStretchFactor(self.box_stop, 1)
 
@@ -415,8 +438,14 @@ class MinMaxScanOption(RangeScanOption):
 
 
 class CentreSpanScanOption(RangeScanOption):
+    option_tooltip = (
+        "Scan symmetrically around a centre using a half-span, on either a finite "
+        "grid or an infinitely refining grid."
+    )
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box_centre = self._make_spin_box()
+        self.box_centre.setToolTip("Centre value")
         layout.addWidget(self.box_centre)
         layout.setStretchFactor(self.box_centre, 1)
 
@@ -425,6 +454,7 @@ class CentreSpanScanOption(RangeScanOption):
         layout.setStretchFactor(self.plusminus, 0)
 
         self.box_half_span = self._make_spin_box(set_limits_from_spec=False)
+        self.box_half_span.setToolTip("Half-span around the centre value")
         layout.addWidget(self.box_half_span)
         layout.setStretchFactor(self.box_half_span, 1)
 
@@ -492,8 +522,11 @@ class CentreSpanScanOption(RangeScanOption):
 
 
 class ExpandingScanOption(NumericScanOption):
+    option_tooltip = "Scan outward from a centre with a fixed spacing between steps."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         self.box_centre = self._make_spin_box()
+        self.box_centre.setToolTip("Centre value")
         layout.addWidget(self.box_centre)
         layout.setStretchFactor(self.box_centre, 1)
 
@@ -507,6 +540,7 @@ class ExpandingScanOption(NumericScanOption):
 
         self.box_spacing = self._make_spin_box()
         self.box_spacing.setSuffix(self.box_spacing.suffix() + " steps")
+        self.box_spacing.setToolTip("Spacing between neighbouring scan points")
         layout.addWidget(self.box_spacing)
         layout.setStretchFactor(self.box_spacing, 1)
 
@@ -557,6 +591,8 @@ class ExpandingScanOption(NumericScanOption):
 
 
 class ListScanOption(NumericScanOption):
+    option_tooltip = "Scan an explicit list of values."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         class Validator(QtGui.QValidator):
             def validate(self, input, pos):
@@ -568,6 +604,7 @@ class ListScanOption(NumericScanOption):
 
         self.box_pyon = QtWidgets.QLineEdit()
         self.box_pyon.setValidator(Validator(self))
+        self.box_pyon.setToolTip("Comma-separated list of scan values")
         layout.addWidget(self.box_pyon)
 
         layout.addWidget(make_divider())
@@ -604,11 +641,14 @@ class ListScanOption(NumericScanOption):
 
 
 class BoolScanOption(ScanOption):
+    option_tooltip = "Scan both boolean values, false and true."
+
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         dummy_box = QtWidgets.QCheckBox()
         dummy_box.setTristate()
         dummy_box.setEnabled(False)
         dummy_box.setChecked(True)
+        dummy_box.setToolTip("Boolean scan covers both false and true")
         layout.addWidget(dummy_box)
         layout.setStretchFactor(dummy_box, 0)
         layout.addWidget(make_divider())
@@ -699,6 +739,8 @@ class EnumMemberSelectionDialog(QtWidgets.QDialog):
 
 
 class EnumScanOption(ScanOption):
+    option_tooltip = "Scan a selected subset of enum members."
+
     def __init__(self, schema: dict[str, Any], path: str):
         super().__init__(schema, path)
         self._members = self.schema["spec"]["members"]

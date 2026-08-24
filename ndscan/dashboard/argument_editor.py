@@ -102,6 +102,7 @@ class ScanOptions:
         self.num_repeats_box.setMinimum(1)
         # A gratuitous, but hopefully generous restriction
         self.num_repeats_box.setMaximum(2**16)
+        self.num_repeats_box.setToolTip("Number of times to repeat the full scan")
         num_repeats_layout.addWidget(self.num_repeats_box)
         num_repeats_layout.setStretchFactor(self.num_repeats_box, 0)
 
@@ -139,6 +140,9 @@ class ScanOptions:
         self.num_repeats_per_point_box.setMinimum(1)
         # A gratuitous, but hopefully generous restriction
         self.num_repeats_per_point_box.setMaximum(2**16)
+        self.num_repeats_per_point_box.setToolTip(
+            "Number of consecutive acquisitions to perform at each scan point"
+        )
         self.num_repeats_per_point_box.setValue(
             current_scan.get("num_repeats_per_point", 1)
         )
@@ -159,6 +163,7 @@ class ScanOptions:
 
         self.no_axes_box = QtWidgets.QComboBox()
         self.no_axes_box.addItems([m.value for m in NoAxesMode])
+        self.no_axes_box.setToolTip("Choose what to do when no scan axes are configured")
         mode = NoAxesMode[current_scan.get("no_axes_mode", "single")]
         self.no_axes_box.setCurrentText(mode.value)
         no_axis_layout.addWidget(self.no_axes_box)
@@ -180,6 +185,9 @@ class ScanOptions:
         randomise_globally_layout.setStretchFactor(randomise_globally_label, 0)
 
         self.randomise_globally_box = QtWidgets.QCheckBox()
+        self.randomise_globally_box.setToolTip(
+            "Randomise the overall point order across all scan axes"
+        )
         self.randomise_globally_box.setChecked(
             current_scan.get("randomise_order_globally", False)
         )
@@ -887,6 +895,7 @@ class OverrideEntry(LayoutWidget):
         self.path = path
 
         self.scan_type = QtWidgets.QComboBox()
+        self.scan_type.setToolTip("Choose how this parameter is fixed or scanned")
         self.addWidget(self.scan_type, col=0)
 
         self.widget_stack = QtWidgets.QStackedWidget()
@@ -938,6 +947,11 @@ class OverrideEntry(LayoutWidget):
             self.scan_type.clear()
             for index in self._visible_option_indices:
                 self.scan_type.addItem(self._option_names[index])
+                self.scan_type.setItemData(
+                    self.scan_type.count() - 1,
+                    self.options[index].option_tooltip,
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                )
             self.scan_type.setCurrentIndex(self._visible_option_indices.index(target))
         self._select_option(target)
         self.scan_type.setEnabled(len(self._visible_option_indices) > 1)
