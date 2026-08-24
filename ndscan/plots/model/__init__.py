@@ -182,16 +182,22 @@ class ScanModel(Model):
         schema_revision: int,
         context: Context,
         execution_mode: str = "scan",
+        optimisation_objective: dict[str, str] | None = None,
     ):
         super().__init__(schema_revision, context)
         self.axes = axes
         self.execution_mode = execution_mode
+        self.optimisation_objective = optimisation_objective
         self._annotations = []
         self._annotation_schemata = []
         self._online_analyses = {}
 
     def get_point_data(self) -> dict[str, Any]:
         raise NotImplementedError
+
+    def get_optimisation_data(self) -> dict[str, Any] | None:
+        """Return candidate values actually supplied to the optimiser, if recorded."""
+        return None
 
     def get_annotations(self) -> list[Annotation]:
         return self._annotations

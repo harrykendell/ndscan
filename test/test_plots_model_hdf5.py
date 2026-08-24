@@ -44,6 +44,7 @@ class HDF5ScanModelTest(unittest.TestCase):
         file = make_in_memory_file()
         file["ndscan." + SCHEMA_REVISION_KEY] = SCHEMA_REVISION
         file["ndscan.execution_mode"] = "optimise"
+        file["ndscan.objective"] = json.dumps({"channel": "value", "direction": "max"})
         file["ndscan.axes"] = json.dumps([ENUM_AXIS])
         file["ndscan.channels"] = json.dumps(
             {"value": FLOAT_CHANNEL, "spec": SUBSCAN_CHANNEL}
@@ -55,6 +56,10 @@ class HDF5ScanModelTest(unittest.TestCase):
         file["ndscan.points.axis_0"] = ["foo", "bar"]
         file["ndscan.points.channel_value"] = [0.1, 0.2]
         file["ndscan.points.channel_spec"] = ["{}", "{}"]
+        file["ndscan.optimizer.evaluations.axis_0"] = ["foo"]
+        file["ndscan.optimizer.evaluations.objective"] = [0.2]
+        file["ndscan.optimizer.evaluations.objective_std"] = [0.01]
+        file["ndscan.optimizer.evaluations.point_index"] = [1]
 
         model = HDF5Root(file, "ndscan.", Context(), "test").get_model()
 
@@ -64,6 +69,33 @@ class HDF5ScanModelTest(unittest.TestCase):
         self.assertEqual(list(data["channel_spec"]), ["{}", "{}"])
         self.assertEqual(model.get_analysis_result_source("message").get(), "all fine")
         self.assertEqual(model.execution_mode, "optimise")
+        self.assertEqual(
+            model.optimisation_objective,
+            {"channel": "value", "direction": "max"},
+        )
+        optimisation_data = model.get_optimisation_data()
+        self.assertEqual(list(optimisation_data["axis_0"]), ["foo"])
+        self.assertEqual(list(optimisation_data["objective"]), [0.2])
+        self.assertEqual(list(optimisation_data["point_index"]), [1])
+
+    def test_legacy_optimisation_objective_defaults_to_minimise(self):
+        file = make_in_memory_file()
+        file["ndscan." + SCHEMA_REVISION_KEY] = SCHEMA_REVISION
+        file["ndscan.axes"] = json.dumps([ENUM_AXIS])
+        file["ndscan.channels"] = json.dumps({"value": FLOAT_CHANNEL})
+        file["ndscan.online_analyses"] = json.dumps({})
+        file["ndscan.annotations"] = json.dumps([])
+        file["ndscan.analysis_results"] = json.dumps({})
+        file["ndscan.points.axis_0"] = ["foo"]
+        file["ndscan.points.channel_value"] = [0.1]
+        file["ndscan.optimizer.objective_channel"] = "value"
+
+        model = HDF5Root(file, "ndscan.", Context(), "test").get_model()
+
+        self.assertEqual(
+            model.optimisation_objective,
+            {"channel": "value", "direction": "min"},
+        )
 
     def test_missing_execution_mode_defaults_to_scan(self):
         file = make_in_memory_file()

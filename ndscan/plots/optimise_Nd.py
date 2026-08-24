@@ -87,6 +87,40 @@ def _channel_label(channel, fallback: str) -> str:
     return label or fallback
 
 
+def _resolve_objective_channel_name(model: ScanModel, channels: dict[str, dict]):
+    objective = model.optimisation_objective
+    if not objective:
+        return None
+    configured = objective.get("channel")
+    if configured in channels:
+        return configured
+    return next(
+        (name for name, schema in channels.items() if schema.get("path") == configured),
+        None,
+    )
+
+
+def _best_so_far_indices(values, direction: str) -> np.ndarray:
+    """Return the source index of the best finite value after each evaluation.
+
+    Entries before the first finite value are ``-1`` and should not be displayed.
+    """
+    values = np.asarray(values, dtype=float)
+    result = np.full(len(values), -1, dtype=int)
+    best_idx = None
+    best_value = np.inf if direction == "min" else -np.inf
+    for idx, value in enumerate(values):
+        if np.isfinite(value) and (
+            best_idx is None
+            or (value < best_value if direction == "min" else value > best_value)
+        ):
+            best_idx = idx
+            best_value = value
+        if best_idx is not None:
+            result[idx] = best_idx
+    return result
+
+
 def _image_pixel_centres(
     range_spec: tuple[float, float, float], num_pixels: int
 ) -> np.ndarray:
@@ -101,6 +135,16 @@ def _image_pixel_centres(
     upper_edge = maximum + increment / 2
     pixel_width = (upper_edge - lower_edge) / num_pixels
     return lower_edge + (np.arange(num_pixels) + 0.5) * pixel_width
+
+
+def _make_optimisation_image_item() -> ClickableImageItem:
+    """Create the image item matching the transposed row-major upload below."""
+    return ClickableImageItem(axisOrder="row-major")
+
+
+def _image_data_for_display(image_data: np.ndarray) -> np.ndarray:
+    """Convert internal ``[x, y]`` data to row-major ``[y, x]`` image data."""
+    return np.ascontiguousarray(image_data.T)
 
 
 class _DelaunayInterpolationLayer:
@@ -421,7 +465,7 @@ class _ImagePlot:
         self.colorbar.setLevels(z_limits)
 
         self.image_item.setImage(
-            np.ascontiguousarray(self.image_data.T), autoLevels=False
+            _image_data_for_display(self.image_data), autoLevels=False
         )
         self.z_crosshair_label.set_image_data(
             self.image_data, self.x_range, self.y_range, self.current_z_limits
@@ -473,6 +517,7 @@ class OptimisePlotWidget(SliceableMenuPanesWidget):
         self.layout.setRowPreferredHeight(0, 10000)
         self.layout.setRowPreferredHeight(1, 30000)
         self.plot: _ImagePlot | None = None
+        self.objective_channel_name = None
         self.crosshair = None
         self._highlighted_xy = (None, None)
 
@@ -501,12 +546,24 @@ class OptimisePlotWidget(SliceableMenuPanesWidget):
         if not self.data_names:
             self.error.emit("No scalar result channels to display")
 
+        self.objective_channel_name = _resolve_objective_channel_name(
+            self.model, channels
+        )
+        if self.objective_channel_name not in self.data_names:
+            logger.warning(
+                "Configured optimisation objective channel %r is unavailable in plot data",
+                None
+                if self.model.optimisation_objective is None
+                else self.model.optimisation_objective.get("channel"),
+            )
+            self.objective_channel_name = None
+
         self._setup_display_axes()
 
         def range_spec(schema):
             return _axis_min(schema), _axis_max(schema), _axis_increment(schema)
 
-        image_item = ClickableImageItem()
+        image_item = _make_optimisation_image_item()
         image_item.sigClicked.connect(self._point_clicked)
 
         self.plot_item.addItem(image_item)
@@ -524,7 +581,7 @@ class OptimisePlotWidget(SliceableMenuPanesWidget):
         self.plot = _ImagePlot(
             image_item,
             colorbar,
-            self.data_names[0],
+            self.objective_channel_name or self.data_names[0],
             *x_range_spec,
             *y_range_spec,
             channels,
@@ -754,21 +811,33 @@ class OptimisePlotWidget(SliceableMenuPanesWidget):
         if self.convergence_plot_item is None:
             return
 
-        z_key = "channel_" + self.plot.active_channel_name
-        z_data = np.asarray(points.get(z_key, []), dtype=float)
+        if self.objective_channel_name is None:
+            self._clear_parameter_convergence()
+            return
+
+        optimisation_data = self.model.get_optimisation_data()
+        if optimisation_data is None:
+            tracking_points = points
+            z_data = np.asarray(
+                points.get("channel_" + self.objective_channel_name, []), dtype=float
+            )
+        else:
+            tracking_points = optimisation_data
+            z_data = np.asarray(optimisation_data.get("objective", []), dtype=float)
         num_points = min(
             [len(z_data)]
             + [
-                len(points.get(f"axis_{idx}", []))
+                len(tracking_points.get(f"axis_{idx}", []))
                 for idx in range(len(self.model.axes))
             ]
+            + (
+                [len(tracking_points.get("point_index", []))]
+                if optimisation_data is not None
+                else []
+            )
         )
         if num_points == 0:
-            for curve in self.convergence_curves:
-                curve.setData([], [])
-            if self.convergence_objective_curve is not None:
-                self.convergence_objective_curve.setData([], [])
-            self.convergence_plot_item.setTitle(None)
+            self._clear_parameter_convergence()
             return
 
         while len(self.convergence_curves) < len(self.model.axes):
@@ -789,37 +858,30 @@ class OptimisePlotWidget(SliceableMenuPanesWidget):
 
         finite_z = np.isfinite(z_data[:num_points])
         if not np.any(finite_z):
-            for curve in self.convergence_curves:
-                curve.setData([], [])
-            self.convergence_objective_curve.setData([], [])
-            self.convergence_plot_item.setTitle(None)
+            self._clear_parameter_convergence()
             return
 
-        best_indices = np.empty(num_points, dtype=int)
-        best_idx = None
-        best_z = np.inf
-        for idx, z in enumerate(z_data[:num_points]):
-            if np.isfinite(z) and (best_idx is None or z < best_z):
-                best_idx = idx
-                best_z = z
-            best_indices[idx] = 0 if best_idx is None else best_idx
-
-        evaluations = np.arange(num_points)
+        direction = self.model.optimisation_objective.get("direction", "min")
+        best_indices = _best_so_far_indices(z_data[:num_points], direction)
+        valid = best_indices >= 0
+        evaluations = np.arange(num_points)[valid]
+        visible_best_indices = best_indices[valid]
         for axis_idx, curve in enumerate(self.convergence_curves):
             values = np.asarray(
-                self._axis_values_numeric(points, axis_idx, num_points), dtype=float
+                self._axis_values_numeric(tracking_points, axis_idx, num_points),
+                dtype=float,
             )
-            values = values[best_indices]
+            values = values[visible_best_indices]
             curve.setData(evaluations, self._normalise_axis_values(axis_idx, values))
 
-        best_objective_values = z_data[best_indices]
+        best_objective_values = z_data[visible_best_indices]
         self.convergence_objective_curve.setData(
             evaluations,
             self._normalise_objective_values(best_objective_values),
         )
 
-        best_idx = best_indices[num_points - 1]
-        channel = self.plot.channels[self.plot.active_channel_name]
+        best_idx = visible_best_indices[-1]
+        channel = self.plot.channels[self.objective_channel_name]
         legend_entries = [
             (
                 self.convergence_objective_color,
@@ -830,7 +892,7 @@ class OptimisePlotWidget(SliceableMenuPanesWidget):
             schema = self.model.axes[axis_idx]
             param = schema["param"]
             name = param["fqn"].split(".")[-1]
-            value = points[f"axis_{axis_idx}"][best_idx]
+            value = tracking_points[f"axis_{axis_idx}"][best_idx]
             legend_entries.append(
                 (
                     color,
@@ -840,6 +902,13 @@ class OptimisePlotWidget(SliceableMenuPanesWidget):
         self._set_convergence_legend(legend_entries)
 
         self.convergence_plot_item.setXRange(0, max(num_points - 1, 1), padding=0)
+
+    def _clear_parameter_convergence(self):
+        for curve in self.convergence_curves:
+            curve.setData([], [])
+        if self.convergence_objective_curve is not None:
+            self.convergence_objective_curve.setData([], [])
+        self.convergence_plot_item.setTitle(None)
 
     def _format_tracking_value(self, schema, value):
         param = schema["param"]

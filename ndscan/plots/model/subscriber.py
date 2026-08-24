@@ -71,12 +71,21 @@ class SubscriberRoot(Root):
                     self._prefix, schema_revision, self._context
                 )
             else:
+                objective = None
+                if objective_json := d("objective"):
+                    objective = json.loads(objective_json)
+                elif d("optimizer.objective_channel"):
+                    objective = {
+                        "channel": d("optimizer.objective_channel"),
+                        "direction": d("optimizer.objective_direction") or "min",
+                    }
                 self._model = SubscriberScanModel(
                     axes,
                     self._prefix,
                     schema_revision,
                     self._context,
                     d("execution_mode") or "scan",
+                    objective,
                 )
 
             self._axes_initialised = True
@@ -169,8 +178,15 @@ class SubscriberScanModel(ScanModel):
         schema_revision: int,
         context: Context,
         execution_mode: str = "scan",
+        optimisation_objective: dict[str, str] | None = None,
     ):
-        super().__init__(axes, schema_revision, context, execution_mode)
+        super().__init__(
+            axes,
+            schema_revision,
+            context,
+            execution_mode,
+            optimisation_objective,
+        )
         self._prefix = prefix
         self._series_initialised = False
         self._online_analyses_initialised = False
@@ -180,6 +196,7 @@ class SubscriberScanModel(ScanModel):
         self._analysis_results_json = None
         self._analysis_result_sources = {}
         self._point_data = {}
+        self._optimisation_data = None
 
     def data_changed(
         self, values: dict[str, Any], mods: Iterable[dict[str, Any]]
@@ -217,6 +234,22 @@ class SubscriberScanModel(ScanModel):
         for name, source in self._analysis_result_sources.items():
             source.set(values.get(self._prefix + "analysis_result." + name))
 
+        evaluation_prefix = self._prefix + "optimizer.evaluations."
+        if evaluation_prefix + "objective" in values:
+            self._optimisation_data = {
+                f"axis_{index}": values.get(evaluation_prefix + f"axis_{index}", [])
+                for index in range(len(self.axes))
+            }
+            self._optimisation_data.update(
+                {
+                    "objective": values.get(evaluation_prefix + "objective", []),
+                    "objective_std": values.get(
+                        evaluation_prefix + "objective_std", []
+                    ),
+                    "point_index": values.get(evaluation_prefix + "point_index", []),
+                }
+            )
+
         point_data_changed = False
         for name in [f"axis_{i}" for i in range(len(self.axes))] + [
             "channel_" + c for c in self._channel_schemata.keys()
@@ -242,6 +275,9 @@ class SubscriberScanModel(ScanModel):
 
     def get_point_data(self) -> dict[str, Any]:
         return self._point_data
+
+    def get_optimisation_data(self) -> dict[str, Any] | None:
+        return self._optimisation_data
 
     def get_analysis_result_source(self, name: str) -> FixedDataSource | None:
         if name not in self._analysis_result_sources:

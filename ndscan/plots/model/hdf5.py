@@ -44,6 +44,20 @@ class HDF5Root(Root):
         execution_mode_key = prefix + "execution_mode"
         if execution_mode_key in datasets:
             execution_mode = _read(datasets[execution_mode_key])
+        optimisation_objective = None
+        objective_key = prefix + "objective"
+        if objective_key in datasets:
+            optimisation_objective = json.loads(_read(datasets[objective_key]))
+        elif prefix + "optimizer.objective_channel" in datasets:
+            direction_key = prefix + "optimizer.objective_direction"
+            optimisation_objective = {
+                "channel": _read(datasets[prefix + "optimizer.objective_channel"]),
+                "direction": (
+                    _read(datasets[direction_key])
+                    if direction_key in datasets
+                    else "min"
+                ),
+            }
 
         if dim == 0:
             self._model = HDF5SingleShotModel(
@@ -51,7 +65,13 @@ class HDF5Root(Root):
             )
         else:
             self._model = HDF5ScanModel(
-                axes, datasets, prefix, schema_revision, context, execution_mode
+                axes,
+                datasets,
+                prefix,
+                schema_revision,
+                context,
+                execution_mode,
+                optimisation_objective,
             )
 
         self._title = title
@@ -91,8 +111,15 @@ class HDF5ScanModel(ScanModel):
         schema_revision: int,
         context: Context,
         execution_mode: str = "scan",
+        optimisation_objective: dict[str, str] | None = None,
     ):
-        super().__init__(axes, schema_revision, context, execution_mode)
+        super().__init__(
+            axes,
+            schema_revision,
+            context,
+            execution_mode,
+            optimisation_objective,
+        )
 
         self._channel_schemata = json.loads(datasets[prefix + "channels"][()])
 
@@ -117,11 +144,31 @@ class HDF5ScanModel(ScanModel):
         self._set_online_analyses(json.loads(datasets[prefix + "online_analyses"][()]))
         self._set_annotation_schemata(json.loads(datasets[prefix + "annotations"][()]))
 
+        self._optimisation_data = None
+        evaluation_prefix = prefix + "optimizer.evaluations."
+        if evaluation_prefix + "objective" in datasets:
+            self._optimisation_data = {
+                f"axis_{index}": _read(datasets[evaluation_prefix + f"axis_{index}"])
+                for index in range(len(self.axes))
+            }
+            self._optimisation_data.update(
+                {
+                    "objective": _read(datasets[evaluation_prefix + "objective"]),
+                    "objective_std": _read(
+                        datasets[evaluation_prefix + "objective_std"]
+                    ),
+                    "point_index": _read(datasets[evaluation_prefix + "point_index"]),
+                }
+            )
+
     def get_channel_schemata(self) -> dict[str, Any]:
         return self._channel_schemata
 
     def get_point_data(self) -> dict[str, Any]:
         return self._point_data
+
+    def get_optimisation_data(self) -> dict[str, Any] | None:
+        return self._optimisation_data
 
     def get_analysis_result_source(self, name: str) -> FixedDataSource | None:
         if name not in self._analysis_result_sources:

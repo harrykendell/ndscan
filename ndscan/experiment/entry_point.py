@@ -529,6 +529,7 @@ class TopLevelRunner(HasEnvironment):
             self._coordinate_sinks,
             self._objective_channel,
             self._optimizer_result_publisher.update_best,
+            self._optimizer_result_publisher.append_evaluation,
             self._optimizer_result_publisher.set_termination_reason,
         )
         self._set_completed()

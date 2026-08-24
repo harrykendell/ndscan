@@ -36,6 +36,7 @@ class HistoryFromScanModel(ScanModel):
             parent.schema_revision,
             parent.context,
             parent.execution_mode,
+            parent.optimisation_objective,
         )
 
         self._sliced_data = {}
@@ -125,6 +126,14 @@ class HistoryFromScanModel(ScanModel):
 
     def get_point_data(self) -> dict[str, Any]:
         return self._sliced_data
+
+    def get_optimisation_data(self) -> dict[str, Any] | None:
+        data = self.parent.get_optimisation_data()
+        if data is None or self._cutoff == -1:
+            return data
+        point_indices = np.asarray(data.get("point_index", []))
+        num_visible = int(np.count_nonzero(point_indices <= self._cutoff))
+        return {name: values[:num_visible] for name, values in data.items()}
 
     def quit(self) -> None:
         self.parent.points_appended.disconnect(self._append_data)

@@ -116,14 +116,28 @@ class SinglePointTest(unittest.TestCase):
 
 
 class ScanExecutionModeTest(unittest.TestCase):
-    def test_history_proxy_preserves_execution_mode(self):
+    def test_history_proxy_preserves_optimisation_metadata_and_evaluations(self):
         model = SubscriberScanModel(
             [{"param": {"description": "x"}, "path": "*"}],
             "ndscan.",
             SCHEMA_REVISION,
             Context(),
             "optimise",
+            {"channel": "objective", "direction": "max"},
         )
+        model._point_data = {"axis_0": [0.0, 1.0, 2.0, 3.0]}
+        model._optimisation_data = {
+            "axis_0": [0.0, 2.0],
+            "objective": [1.0, 3.0],
+            "objective_std": [0.1, 0.2],
+            "point_index": [1, 3],
+        }
 
         self.assertEqual(model.execution_mode, "optimise")
-        self.assertEqual(HistoryFromScanModel(model).execution_mode, "optimise")
+        history = HistoryFromScanModel(model, cutoff=2)
+        self.assertEqual(history.execution_mode, "optimise")
+        self.assertEqual(
+            history.optimisation_objective,
+            {"channel": "objective", "direction": "max"},
+        )
+        self.assertEqual(history.get_optimisation_data()["objective"], [1.0])

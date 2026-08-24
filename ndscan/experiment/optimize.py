@@ -26,7 +26,7 @@ from .optimizers import (
     OptimizeSpec,
     build_algorithm_spec,
 )
-from .result_channels import NumericChannel, ResultSink
+from .result_channels import AppendingDatasetSink, NumericChannel, ResultSink
 from .scan_runner import ScanAxis, select_runner_class
 
 logger = logging.getLogger(__name__)
@@ -259,6 +259,8 @@ class OptimizeRunner(HasEnvironment):
         objective_channel: NumericChannel,
         on_best_updated: Callable[[tuple[float, ...], float, float], None]
         | None = None,
+        on_evaluation: Callable[[tuple[float, ...], float, float, int], None]
+        | None = None,
         on_terminated: Callable[[str], None] | None = None,
     ) -> None:
         optimizer = create_optimizer(spec)
@@ -373,8 +375,22 @@ class OptimizeRunner(HasEnvironment):
                                 )
                                 if normalised is None:
                                     optimizer.tell(current_point, float("inf"), 0.0)
+                                    if on_evaluation is not None:
+                                        on_evaluation(
+                                            current_point,
+                                            float("nan"),
+                                            float("nan"),
+                                            num_points_recorded - 1,
+                                        )
                                 else:
                                     objective_value, objective_std_dev = normalised
+                                    if on_evaluation is not None:
+                                        on_evaluation(
+                                            current_point,
+                                            objective_value,
+                                            objective_std_dev,
+                                            num_points_recorded - 1,
+                                        )
                                     transformed = (
                                         objective_value
                                         if spec.objective.direction == "min"
@@ -399,6 +415,13 @@ class OptimizeRunner(HasEnvironment):
                                 return
 
                             optimizer.tell(current_point, float("inf"), 0.0)
+                            if on_evaluation is not None:
+                                on_evaluation(
+                                    current_point,
+                                    float("nan"),
+                                    float("nan"),
+                                    max(num_points_recorded - 1, 0),
+                                )
                             candidates_since_reference += 1
                             current_objective_samples.clear()
                             current_point = None
@@ -438,6 +461,42 @@ class OptimizeResultPublisher:
         self._spec = spec
         self._objective_channel = objective_channel
         self._best = None
+        self._evaluation_axis_sinks = [
+            AppendingDatasetSink(
+                owner, dataset_prefix + f"optimizer.evaluations.axis_{index}"
+            )
+            for index in range(len(spec.axes))
+        ]
+        self._evaluation_objective_sink = AppendingDatasetSink(
+            owner, dataset_prefix + "optimizer.evaluations.objective"
+        )
+        self._evaluation_std_sink = AppendingDatasetSink(
+            owner, dataset_prefix + "optimizer.evaluations.objective_std"
+        )
+        self._evaluation_point_index_sink = AppendingDatasetSink(
+            owner, dataset_prefix + "optimizer.evaluations.point_index"
+        )
+
+    def append_evaluation(
+        self,
+        point: tuple[float, ...],
+        value: float,
+        std_dev: float,
+        point_index: int,
+    ) -> None:
+        """Publish one value actually supplied to the optimiser.
+
+        Reference acquisitions are deliberately omitted. ``point_index`` links each
+        aggregated candidate evaluation back to the last raw acquisition contributing
+        to it, allowing history views to hide future evaluations correctly.
+        """
+        for sink, axis_value in zip(self._evaluation_axis_sinks, point):
+            sink.push(axis_value)
+        self._evaluation_objective_sink.push(value)
+        self._evaluation_std_sink.push(std_dev)
+        # Push this completion marker last so subscribers never see a nominally
+        # complete evaluation before its axes and objective are available.
+        self._evaluation_point_index_sink.push(point_index)
 
     def update_best(
         self, point: tuple[float, ...], value: float, std_dev: float

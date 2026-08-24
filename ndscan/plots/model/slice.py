@@ -139,7 +139,11 @@ class SliceForScanModel(ScanModel):
 
         axes = [self._parent.axes[self._axis_idx]]
         super().__init__(
-            axes, parent.schema_revision, parent.context, parent.execution_mode
+            axes,
+            parent.schema_revision,
+            parent.context,
+            parent.execution_mode,
+            parent.optimisation_objective,
         )
 
         self._sliced_data = {}

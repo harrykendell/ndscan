@@ -680,6 +680,14 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         self.assertAlmostEqual(
             self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 9.5
         )
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.objective"),
+            [10.0, 10.5, 9.5],
+        )
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.point_index"),
+            [1, 3, 5],
+        )
 
     def test_divide_reference_normalisation(self):
         exp = self.create(MultiplicativeDriftScanExp)
@@ -717,6 +725,10 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         )
         self.assertAlmostEqual(
             self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 0.9
+        )
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.objective"),
+            [2.0, 10.0 / 6.0, 0.9],
         )
 
     def test_mean_aggregates_repeated_objective_values(self):
@@ -757,6 +769,14 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
             self.dataset_db.get("ndscan.rid_0.optimizer.best_std"),
             4.242640687119285,
         )
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.objective"),
+            [3.0],
+        )
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.point_index"),
+            [2],
+        )
 
     def test_median_aggregates_repeated_objective_values(self):
         exp = self.create(RepeatOutlierScanExp)
@@ -791,4 +811,8 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         )
         self.assertAlmostEqual(
             self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 0.0
+        )
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.objective"),
+            [0.0],
         )
