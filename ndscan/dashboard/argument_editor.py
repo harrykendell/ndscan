@@ -163,7 +163,9 @@ class ScanOptions:
 
         self.no_axes_box = QtWidgets.QComboBox()
         self.no_axes_box.addItems([m.value for m in NoAxesMode])
-        self.no_axes_box.setToolTip("Choose what to do when no scan axes are configured")
+        self.no_axes_box.setToolTip(
+            "Choose what to do when no scan axes are configured"
+        )
         mode = NoAxesMode[current_scan.get("no_axes_mode", "single")]
         self.no_axes_box.setCurrentText(mode.value)
         no_axis_layout.addWidget(self.no_axes_box)
@@ -895,7 +897,9 @@ class OverrideEntry(LayoutWidget):
         self.path = path
 
         self.scan_type = QtWidgets.QComboBox()
-        self.scan_type.setToolTip("Choose how this parameter is fixed or scanned")
+        self.scan_type.setToolTip(
+            "Choose how this parameter is fixed, scanned, or optimised"
+        )
         self.addWidget(self.scan_type, col=0)
 
         self.widget_stack = QtWidgets.QStackedWidget()

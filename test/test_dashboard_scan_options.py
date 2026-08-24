@@ -1,6 +1,10 @@
 import unittest
 
-from ndscan.dashboard.optimise_options import OptimiseAxisOption
+from ndscan._qt import QtWidgets
+from ndscan.dashboard.optimise_options import (
+    _OPTIMISE_AXIS_FIELDS,
+    OptimiseAxisOption,
+)
 from ndscan.dashboard.scan_options import (
     CentreSpanScanOption,
     FixedScanOption,
@@ -83,6 +87,31 @@ class ScanOptionTooltipTest(unittest.TestCase):
 
 
 class OptimiseAxisDefaultsTest(unittest.TestCase):
+    def test_axis_option_has_explanatory_tooltip(self):
+        self.assertIn("initial value", OptimiseAxisOption.option_tooltip)
+
+    def test_axis_fields_use_lower_initial_and_upper_icons(self):
+        self.assertEqual(
+            _OPTIMISE_AXIS_FIELDS,
+            (
+                (
+                    QtWidgets.QStyle.StandardPixmap.SP_ArrowDown,
+                    "Lower bound",
+                    "box_min",
+                ),
+                (
+                    QtWidgets.QStyle.StandardPixmap.SP_MediaPlay,
+                    "Initial value",
+                    "box_initial",
+                ),
+                (
+                    QtWidgets.QStyle.StandardPixmap.SP_ArrowUp,
+                    "Upper bound",
+                    "box_max",
+                ),
+            ),
+        )
+
     def test_optimise_axis_uses_parameter_default_as_initial_value(self):
         option = OptimiseAxisOption(_schema("6.0", min=0.0, max=10.0), "*")
         option.box_min = _ValueBox()

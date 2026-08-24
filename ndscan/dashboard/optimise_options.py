@@ -69,6 +69,7 @@ class ExecutionModeSelector(QtWidgets.QWidget):
         layout.addWidget(QtWidgets.QLabel("Execution mode:"))
         self.box = QtWidgets.QComboBox()
         self.box.addItems([mode.value for mode in ExecutionMode])
+        self.box.setToolTip("Choose whether to run a scan or an optimisation")
         try:
             mode = ExecutionMode[current_mode]
         except KeyError:
@@ -148,11 +149,17 @@ class OptimiseOptions:
         layout.addWidget(QtWidgets.QLabel("Repeat each point"))
         self.repeats_box = QtWidgets.QSpinBox()
         self.repeats_box.setRange(1, 10**6)
+        self.repeats_box.setToolTip(
+            "Number of acquisitions to combine for each optimiser candidate"
+        )
         self.repeats_box.setValue(current.get("num_repeats_per_point", 1))
         layout.addWidget(self.repeats_box)
         layout.addWidget(QtWidgets.QLabel("times, take the"))
         self.averaging_box = QtWidgets.QComboBox()
         self.averaging_box.addItems(self._averaging_methods)
+        self.averaging_box.setToolTip(
+            "How repeated objective measurements are combined before updating the optimiser"
+        )
         averaging = current.get("averaging_method", "mean")
         self.averaging_box.setCurrentText(
             next(
@@ -172,6 +179,9 @@ class OptimiseOptions:
         layout.setContentsMargins(5, 5, 5, 5)
         self.reference_box = QtWidgets.QComboBox()
         self.reference_box.addItems(self._reference_methods)
+        self.reference_box.setToolTip(
+            "Optionally normalise each candidate to the periodically remeasured initial point"
+        )
         reference_method = current.get("reference_normalisation", "none")
         self.reference_box.setCurrentText(
             next(
@@ -187,6 +197,9 @@ class OptimiseOptions:
         layout.addWidget(QtWidgets.QLabel("(resampled every"))
         self.reference_interval_box = QtWidgets.QSpinBox()
         self.reference_interval_box.setRange(1, 10**7)
+        self.reference_interval_box.setToolTip(
+            "Number of candidate evaluations between initial-point reference measurements"
+        )
         self.reference_interval_box.setValue(
             current.get("reference_resample_interval", 1)
         )
@@ -216,6 +229,7 @@ class OptimiseOptions:
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Algorithm:"))
         self.algorithm_box = QtWidgets.QComboBox()
+        self.algorithm_box.setToolTip("Choose the optimisation algorithm")
         self._algorithm_kinds = {}
         for kind, info in ALGORITHM_REGISTRY.items():
             label = info["display_name"]
@@ -359,6 +373,11 @@ class OptimiseOptions:
 
 class OptimiseAxisOption(NumericScanOption):
     """Min/initial/max controls for one floating-point optimisation parameter."""
+
+    option_tooltip = (
+        "Optimise this parameter between lower and upper bounds, starting from the "
+        "initial value."
+    )
 
     def _default_values(self) -> tuple[float, float, float]:
         lower, upper = self._default_numeric_range_values()
