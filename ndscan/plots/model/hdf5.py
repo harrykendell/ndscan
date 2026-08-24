@@ -40,6 +40,10 @@ class HDF5Root(Root):
 
         axes = json.loads(datasets[prefix + "axes"][()])
         dim = len(axes)
+        execution_mode = "scan"
+        execution_mode_key = prefix + "execution_mode"
+        if execution_mode_key in datasets:
+            execution_mode = _read(datasets[execution_mode_key])
 
         if dim == 0:
             self._model = HDF5SingleShotModel(
@@ -47,7 +51,7 @@ class HDF5Root(Root):
             )
         else:
             self._model = HDF5ScanModel(
-                axes, datasets, prefix, schema_revision, context
+                axes, datasets, prefix, schema_revision, context, execution_mode
             )
 
         self._title = title
@@ -86,8 +90,9 @@ class HDF5ScanModel(ScanModel):
         prefix: str,
         schema_revision: int,
         context: Context,
+        execution_mode: str = "scan",
     ):
-        super().__init__(axes, schema_revision, context)
+        super().__init__(axes, schema_revision, context, execution_mode)
 
         self._channel_schemata = json.loads(datasets[prefix + "channels"][()])
 

@@ -177,10 +177,15 @@ class ScanModel(Model):
     has_independent_history = True
 
     def __init__(
-        self, axes: list[dict[str, Any]], schema_revision: int, context: Context
+        self,
+        axes: list[dict[str, Any]],
+        schema_revision: int,
+        context: Context,
+        execution_mode: str = "scan",
     ):
         super().__init__(schema_revision, context)
         self.axes = axes
+        self.execution_mode = execution_mode
         self._annotations = []
         self._annotation_schemata = []
         self._online_analyses = {}

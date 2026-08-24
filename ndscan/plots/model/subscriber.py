@@ -72,7 +72,11 @@ class SubscriberRoot(Root):
                 )
             else:
                 self._model = SubscriberScanModel(
-                    axes, self._prefix, schema_revision, self._context
+                    axes,
+                    self._prefix,
+                    schema_revision,
+                    self._context,
+                    d("execution_mode") or "scan",
                 )
 
             self._axes_initialised = True
@@ -164,8 +168,9 @@ class SubscriberScanModel(ScanModel):
         prefix: str,
         schema_revision: int,
         context: Context,
+        execution_mode: str = "scan",
     ):
-        super().__init__(axes, schema_revision, context)
+        super().__init__(axes, schema_revision, context, execution_mode)
         self._prefix = prefix
         self._series_initialised = False
         self._online_analyses_initialised = False

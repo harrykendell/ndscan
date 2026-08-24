@@ -62,7 +62,12 @@ class SubscanModel(ScanModel):
     def __init__(
         self, schema: dict[str, Any], parent: SinglePointModel, spec_channel_name: str
     ):
-        super().__init__(schema["axes"], parent.schema_revision, parent.context)
+        super().__init__(
+            schema["axes"],
+            parent.schema_revision,
+            parent.context,
+            schema.get("execution_mode", "scan"),
+        )
         self._channel_schemata = schema["channels"]
 
         # Resolve the result channels holding the flattened subscan data by path. An

@@ -138,7 +138,9 @@ class SliceForScanModel(ScanModel):
         self._channel_schemata = self._parent.get_channel_schemata()
 
         axes = [self._parent.axes[self._axis_idx]]
-        super().__init__(axes, parent.schema_revision, parent.context)
+        super().__init__(
+            axes, parent.schema_revision, parent.context, parent.execution_mode
+        )
 
         self._sliced_data = {}
 

@@ -31,7 +31,12 @@ class HistoryFromScanModel(ScanModel):
             to roll back to, or -1 for following the latest state as new points come in.
         """
         self.parent = parent
-        super().__init__(self.parent.axes, parent.schema_revision, parent.context)
+        super().__init__(
+            self.parent.axes,
+            parent.schema_revision,
+            parent.context,
+            parent.execution_mode,
+        )
 
         self._sliced_data = {}
 
