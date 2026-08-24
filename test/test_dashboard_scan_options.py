@@ -1,5 +1,6 @@
 import unittest
 
+from ndscan.dashboard.optimise_options import OptimiseAxisOption
 from ndscan.dashboard.scan_options import (
     CentreSpanScanOption,
     FixedScanOption,
@@ -67,6 +68,31 @@ class NumericDefaultsTest(unittest.TestCase):
 
         self.assertEqual(centred.box_centre.value(), 4.0)
         self.assertEqual(centred.box_half_span.value(), 5.0)
+
+    def test_optimise_axis_uses_parameter_default_as_initial_value(self):
+        option = OptimiseAxisOption(_schema("6.0", min=0.0, max=10.0), "*")
+        option.box_min = _ValueBox()
+        option.box_initial = _ValueBox()
+        option.box_max = _ValueBox()
+
+        option.read_sync_values({})
+        self.assertEqual(option.box_min.value(), 0.0)
+        self.assertEqual(option.box_initial.value(), 6.0)
+        self.assertEqual(option.box_max.value(), 10.0)
+
+        option.read_sync_values({SyncValue.initial: 7.0})
+        self.assertEqual(option.box_initial.value(), 7.0)
+
+    def test_partial_saved_optimise_axis_uses_current_defaults(self):
+        option = OptimiseAxisOption(_schema("6.0", min=0.0, max=10.0), "*")
+        option.box_min = _ValueBox()
+        option.box_initial = _ValueBox()
+        option.box_max = _ValueBox()
+
+        option.attempt_read_from_optimise_parameter({"initial": 8.0})
+        self.assertEqual(option.box_min.value(), 0.0)
+        self.assertEqual(option.box_initial.value(), 8.0)
+        self.assertEqual(option.box_max.value(), 10.0)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 from artiq.gui.scientific_spinbox import ScientificSpinBox
@@ -12,6 +11,35 @@ from .._qt import QtCore, QtWidgets
 from ..experiment.optimize import ALGORITHM_REGISTRY
 from ..utils import ExecutionMode, shorten_to_unambiguous_suffixes
 from .scan_options import NumericScanOption, SyncValue, make_divider
+
+_OPTIMISE_AXIS_FIELDS = (
+    (
+        QtWidgets.QStyle.StandardPixmap.SP_ArrowDown,
+        "Lower bound",
+        "box_min",
+    ),
+    (
+        QtWidgets.QStyle.StandardPixmap.SP_MediaPlay,
+        "Initial value",
+        "box_initial",
+    ),
+    (
+        QtWidgets.QStyle.StandardPixmap.SP_ArrowUp,
+        "Upper bound",
+        "box_max",
+    ),
+)
+
+
+def _make_icon_label(
+    icon: QtWidgets.QStyle.StandardPixmap, tooltip: str
+) -> QtWidgets.QLabel:
+    label = QtWidgets.QLabel()
+    label.setPixmap(QtWidgets.QApplication.style().standardIcon(icon).pixmap(16, 16))
+    label.setToolTip(tooltip)
+    label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+    label.setFixedWidth(20)
+    return label
 
 
 def _make_value_box(minimum: float, maximum: float, value: float, step=None):
@@ -332,22 +360,21 @@ class OptimiseOptions:
 class OptimiseAxisOption(NumericScanOption):
     """Min/initial/max controls for one floating-point optimisation parameter."""
 
-    def _finite_bound(self, value: float, fallback: float) -> float:
-        return value if math.isfinite(value) else fallback
+    def _default_values(self) -> tuple[float, float, float]:
+        lower, upper = self._default_numeric_range_values()
+        initial = self._default_numeric_centre_value((lower + upper) / 2.0)
+        return lower, min(max(initial, lower), upper), upper
 
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        step = float(self.schema.get("spec", {}).get("step", 1.0))
-        lower = self._finite_bound(self.min, -step)
-        upper = self._finite_bound(self.max, step)
-        if lower >= upper:
-            upper = lower + max(step, 1.0)
-        for label, attr, value in (
-            ("Min", "box_min", lower),
-            ("Initial", "box_initial", min(max(0.0, lower), upper)),
-            ("Max", "box_max", upper),
+        lower, initial, upper = self._default_values()
+        for (icon, tooltip, attr), value in zip(
+            _OPTIMISE_AXIS_FIELDS, (lower, initial, upper)
         ):
-            layout.addWidget(QtWidgets.QLabel(label + ":"))
+            label = _make_icon_label(icon, tooltip)
+            layout.addWidget(label)
+            layout.setStretchFactor(label, 0)
             box = self._make_spin_box()
+            box.setToolTip(tooltip)
             box.setValue(value / self.scale)
             setattr(self, attr, box)
             layout.addWidget(box, 1)
@@ -366,14 +393,19 @@ class OptimiseAxisOption(NumericScanOption):
         )
 
     def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box_initial.setValue(sync_values[SyncValue.centre])
+        lower, initial, upper = self._default_values()
+        self.box_min.setValue(lower / self.scale)
+        value = self._current_numeric_sync_value(sync_values)
+        self.box_initial.setValue(initial / self.scale if value is None else value)
+        self.box_max.setValue(upper / self.scale)
 
     def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.initial] = self.box_initial.value()
         sync_values[SyncValue.centre] = self.box_initial.value()
 
     def attempt_read_from_optimise_parameter(self, parameter: dict) -> bool:
-        self.box_min.setValue(parameter["min"] / self.scale)
-        self.box_initial.setValue(parameter["initial"] / self.scale)
-        self.box_max.setValue(parameter["max"] / self.scale)
+        lower, initial, upper = self._default_values()
+        self.box_min.setValue(parameter.get("min", lower) / self.scale)
+        self.box_initial.setValue(parameter.get("initial", initial) / self.scale)
+        self.box_max.setValue(parameter.get("max", upper) / self.scale)
         return True
