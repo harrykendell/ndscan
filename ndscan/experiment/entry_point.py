@@ -34,7 +34,9 @@ from ..utils import (
     PARAMS_ARG_KEY,
     SCHEMA_REVISION,
     SCHEMA_REVISION_KEY,
+    ExecutionMode,
     NoAxesMode,
+    merge_ndscan_params,
     merge_no_duplicates,
     shorten_to_unambiguous_suffixes,
     strip_suffix,
@@ -138,9 +140,12 @@ class FragmentScanExperiment(EnvExperiment):
         """
         param_stores = self.args.make_override_stores()
 
-        spec, no_axes_mode, skip_on_persistent_transitory_error = (
-            self.args.make_scan_spec()
-        )
+        (
+            execution_mode,
+            spec,
+            no_axes_mode,
+            skip_on_persistent_transitory_error,
+        ) = self.args.make_execution_spec()
         for ax in spec.axes:
             fqn = ax.param_schema["fqn"]
             param_stores.setdefault(fqn, []).append((ax.path, ax.param_store))
@@ -166,6 +171,7 @@ class FragmentScanExperiment(EnvExperiment):
         self.tlr = TopLevelRunner(
             self,
             fragment=self.fragment,
+            execution_mode=execution_mode,
             spec=spec,
             no_axes_mode=no_axes_mode,
             max_rtio_underflow_retries=self.max_rtio_underflow_retries,
@@ -233,14 +239,27 @@ class ArgumentInterface(HasEnvironment):
             "always_shown": always_shown_params,
             "overrides": {},
         }
+        result_channels = {}
+        for fragment in fragments:
+            fragment._collect_result_channels(result_channels)
+        desc["result_channels"] = {
+            path: channel.describe()
+            for path, channel in result_channels.items()
+            if channel.save_by_default
+        }
         if scannable:
+            from .optimize import default_optimise_params
+
+            desc["execution_mode"] = ExecutionMode.scan.name
             desc["scan"] = {
                 "axes": [],
                 "num_repeats": 1,
                 "no_axes_mode": "single",
                 "randomise_order_globally": False,
             }
-        self._params = self.get_argument(PARAMS_ARG_KEY, PYONValue(default=desc))
+            desc["optimise"] = default_optimise_params()
+        saved_params = self.get_argument(PARAMS_ARG_KEY, PYONValue(default=desc))
+        self._params = merge_ndscan_params(desc, saved_params)
 
     def make_override_stores(self) -> dict[str, list[tuple[str, ParamStore]]]:
         stores = {}
@@ -309,12 +328,36 @@ class ArgumentInterface(HasEnvironment):
         )
         return spec, no_axes_mode, skip_on_persistent_transitory_error
 
+    def make_optimise_spec(self):
+        from .optimize import make_optimise_spec
+
+        try:
+            return make_optimise_spec(
+                self._params, self._schemata, self._sample_instances
+            )
+        except ValueError as error:
+            raise ScanSpecError(str(error)) from error
+
+    def make_execution_spec(self):
+        try:
+            mode = ExecutionMode[
+                self._params.get("execution_mode", ExecutionMode.scan.name)
+            ]
+        except KeyError as error:
+            raise ScanSpecError(f"Unknown execution mode '{error.args[0]}'") from error
+        if mode == ExecutionMode.optimise:
+            spec, skip = self.make_optimise_spec()
+            return mode, spec, NoAxesMode.single, skip
+        spec, no_axes_mode, skip = self.make_scan_spec()
+        return mode, spec, no_axes_mode, skip
+
 
 class TopLevelRunner(HasEnvironment):
     def build(
         self,
         fragment: ExpFragment,
         spec: ScanSpec,
+        execution_mode: ExecutionMode = ExecutionMode.scan,
         no_axes_mode: NoAxesMode = NoAxesMode.single,
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
@@ -322,6 +365,7 @@ class TopLevelRunner(HasEnvironment):
         skip_on_persistent_transitory_error: bool = False,
     ):
         self.fragment = fragment
+        self.execution_mode = execution_mode
         self.spec = spec
         self.no_axes_mode = no_axes_mode
         self.max_rtio_underflow_retries = max_rtio_underflow_retries
@@ -342,7 +386,7 @@ class TopLevelRunner(HasEnvironment):
         self.dataset_prefix = dataset_prefix
 
         self._is_time_series = False
-        if not self.spec.axes:
+        if self.execution_mode == ExecutionMode.scan and not self.spec.axes:
             if no_axes_mode == NoAxesMode.time_series:
                 self._is_time_series = True
                 param_schema = {
@@ -377,6 +421,19 @@ class TopLevelRunner(HasEnvironment):
             channel.set_sink(sink)
             self._scan_result_sinks[channel] = sink
 
+        self._objective_channel = None
+        self._optimizer_result_publisher = None
+        if self.execution_mode == ExecutionMode.optimise:
+            from .optimize import OptimizeResultPublisher, select_objective_channel
+
+            try:
+                self._objective_channel = select_objective_channel(self.spec, chan_dict)
+            except ValueError as error:
+                raise ScanSpecError(str(error)) from error
+            self._optimizer_result_publisher = OptimizeResultPublisher(
+                self, self.dataset_prefix, self.spec, self._objective_channel
+            )
+
         # Filter analyses, set up analysis result channels, and keep track of all the
         # names in the annotation context.
         self._analyses = (
@@ -405,12 +462,14 @@ class TopLevelRunner(HasEnvironment):
         )
 
         self._coordinate_sinks = None
-
         self.fragment.prepare()
 
     def run(self):
         """Run the (possibly trivial) scan."""
         self._broadcast_metadata()
+
+        if self.execution_mode == ExecutionMode.optimise:
+            return self._run_optimisation()
 
         if not self.spec.axes or self._is_time_series:
             timestamp_sink = None
@@ -446,6 +505,32 @@ class TopLevelRunner(HasEnvironment):
                 for i in range(len(self.spec.axes))
             ]
             runner.run(self.fragment, self.spec, self._coordinate_sinks)
+        self._set_completed()
+        return self._make_coordinate_dict(), self._make_value_dict()
+
+    def _run_optimisation(self):
+        from .optimize import OptimizeRunner
+
+        self._coordinate_sinks = [
+            AppendingDatasetSink(self, self.dataset_prefix + f"points.axis_{i}")
+            for i in range(len(self.spec.axes))
+        ]
+        runner = OptimizeRunner(
+            self,
+            max_rtio_underflow_retries=self.max_rtio_underflow_retries,
+            max_transitory_error_retries=self.max_transitory_error_retries,
+            skip_on_persistent_transitory_error=(
+                self.skip_on_persistent_transitory_error
+            ),
+        )
+        runner.run(
+            self.fragment,
+            self.spec,
+            self._coordinate_sinks,
+            self._objective_channel,
+            self._optimizer_result_publisher.update_best,
+            self._optimizer_result_publisher.set_termination_reason,
+        )
         self._set_completed()
         return self._make_coordinate_dict(), self._make_value_dict()
 
@@ -500,10 +585,19 @@ class TopLevelRunner(HasEnvironment):
         push("source_id", f"{source_prefix}_{self.scheduler.rid}")
 
         push("completed", False)
+        push("execution_mode", self.execution_mode.name)
 
-        self._scan_desc = describe_scan(
-            self.spec, self.fragment, self._short_child_channel_names
-        )
+        if self.execution_mode == ExecutionMode.optimise:
+            from .optimize import describe_optimise
+
+            self._scan_desc = describe_optimise(
+                self.spec, self.fragment, self._short_child_channel_names
+            )
+            self._optimizer_result_publisher.broadcast_metadata(push)
+        else:
+            self._scan_desc = describe_scan(
+                self.spec, self.fragment, self._short_child_channel_names
+            )
         self._scan_desc.update(
             describe_analyses(self._analyses, self._annotation_context)
         )
