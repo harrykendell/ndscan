@@ -23,9 +23,8 @@ class CoordinateSearchOptimizer(Optimizer):
     """Sequential bounded coordinate-search optimizer.
 
     Coordinate search probes one axis at a time by stepping forward and backward within
-    the configured bounds, accepting any improving move and halving the step sizes
-    when a full pass yields no improvement. It is a simple derivative-free local search
-    method
+    the configured bounds, accepting any improving move and halving the step sizes when a
+    full pass yields no improvement. It is a simple derivative-free local search method
     that is easy to reason about and often robust on separable or moderately coupled
     objectives, though it can be slower on strongly rotated valleys.
     """
@@ -91,8 +90,8 @@ class CoordinateSearchOptimizer(Optimizer):
         return tuple(self._pending_point.tolist())
 
     def tell(
-        self, point: tuple[float, ...], value: float, std_dev: float = 0.0
-    ) -> None:
+        self, point: tuple[float, ...], value: float, std_dev: float = 0.0,
+        ref_std_dev: float = 0.0, repeats:int = 3) -> None:
         del point
 
         if self._termination_reason is not None or self._pending_point is None:
@@ -213,8 +212,7 @@ register_algorithm(
             minimum=0.0,
             maximum=10**9,
             default=1e-3,
-            tooltip="Terminate when the objective value changes "
-            "by at most this amount.",
+            tooltip="Terminate when the objective value changes by at most this amount.",
         ),
         AlgorithmParameter(
             name="xatol",
@@ -223,8 +221,7 @@ register_algorithm(
             maximum=1.0,
             default=1e-3,
             step=1e-4,
-            tooltip="Terminate when each axis moves by at most this fraction "
-            "of its configured bounds span.",
+            tooltip="Terminate when each axis moves by at most this fraction of its configured bounds span.",
         ),
         AlgorithmParameter(
             name="step_reduction_factor",
@@ -233,8 +230,7 @@ register_algorithm(
             maximum=0.9,
             default=0.5,
             step=0.05,
-            tooltip="Fraction to reduce step sizes by when no improvement "
-            "is found in a cycle.",
+            tooltip="Fraction to reduce step sizes by when no improvement is found in a cycle.",
         ),
     ],
     spec_cls=CoordinateSearchOptimizeAlgorithmSpec,

@@ -127,7 +127,8 @@ class Optimizer(ABC):
 
     @abstractmethod
     def tell(
-        self, point: tuple[float, ...], value: float, std_dev: float = 0.0
+        self, point: tuple[float, ...], value: float, std_dev: float = 0.0, 
+        ref_std_dev: float = 0.0, repeats: int = 3
     ) -> None:
         """Report the measured objective value for a point returned by :meth:`ask`."""
 

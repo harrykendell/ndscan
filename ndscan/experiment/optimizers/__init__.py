@@ -39,7 +39,6 @@ __all__ = [
 # To add an optimizer algorithm:
 # 1. Create a new file for the algorithm
 # 2a. Implement an OptimizeAlgorithmSpec dataclass for the algorithm's parameters.
-# 2b. Implement an Optimizer subclass following the expected interface.
-# 2c. Register the algorithm using register_algorithm() with appropriate metadata
-#     and parameters for its initialization.
+# 2b. Implement an Optimizer subclass for the algorithm. Ensuring it follows the expected interface.
+# 2c. Register the algorithm using register_algorithm() with appropriate metadata and parameters for its initialization.
 # 3. Add the new classes to __all__ and imports above and in optimize.py.

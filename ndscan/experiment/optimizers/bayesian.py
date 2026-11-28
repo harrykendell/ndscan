@@ -152,10 +152,7 @@ class BayesianOptimizer(Optimizer):
 
         self.n_init = self.n_params * n_init
 
-        # One seed for the whole run: the Latin-hypercube start AND every later
-        # iteration (see get_next_points) derive from it, so the same seed and the
-        # same measured values reproduce the same sequence of points. With
-        # user_seed = -1 a seed is drawn, and printed so the run can be replayed.
+        # One seed for the whole run
         self.seed = self.user_seed if self.user_seed >= 0 else randint(0, 42)
         print(f"BayesianOptimizer seed: {self.seed}")
 
@@ -172,14 +169,9 @@ class BayesianOptimizer(Optimizer):
 
         # Pooled reference-shot noise calibration
         self.reference_shot_std = 0.07
-        self.num_repeats_per_point = 3
-
-        # Candidate mean minus independent reference mean
-        self.calibrated_objective_std = self.reference_shot_std * np.sqrt(
-            2 / self.num_repeats_per_point
-        )
-
-        self.calibrated_objective_var = self.calibrated_objective_std**2
+     
+        self.calibrated_objective_var = self.reference_shot_std**2
+        self.num_failed_points = 0  # told a non-finite value, so discarded
 
     def ask(self) -> tuple[float, ...]:
         """
@@ -234,7 +226,12 @@ class BayesianOptimizer(Optimizer):
         return None
 
     def tell(
-        self, point: tuple[float, ...], value: float, std_dev: float = 0.0
+        self,
+        point: tuple[float, ...],
+        value: float,
+        std_dev: float = 0.0,
+        ref_std_dev: float = 0.0,
+        repeats: int = 3,
     ) -> None:
         """
         Runs the experiment for the given parameters by :meth:`ask`
@@ -251,6 +248,18 @@ class BayesianOptimizer(Optimizer):
         del point
         if self._termination_reason is not None:
             return
+
+        if not np.isfinite(value):
+            # Discard failed points
+            i = self.init_y.shape[0]
+            self.init_x = torch.cat((self.init_x[:i], self.init_x[i + 1 :]))
+            self.num_failed_points += 1
+            return
+
+        # Noise calibration 
+        if ref_std_dev > 0:
+            self.reference_shot_std = ref_std_dev
+            self.calibrated_objective_var = self.reference_shot_std**2
 
         # convert to torch tensors and append the data set with the new point(s)
         self.init_y = torch.cat((
@@ -414,7 +423,7 @@ class BayesianOptimizer(Optimizer):
         window = self.x_predictions[-(self.conv_delay + 1) :]
         values = [v for v, _ in window]
         latest_x = window[-1][1]
-        noise = self.calibrated_objective_std
+        noise = self.reference_shot_std
         self.last_convergence = {
             "spread": max(values) - min(values),
             "ftol": max(self._fatol, noise),

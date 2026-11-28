@@ -120,7 +120,7 @@ def _evaluate_optimizer(opt, objective):
     num_evals = 0
     while (point := opt.ask()) is not None:
         num_evals += 1
-        opt.tell(point, objective(point))
+        opt.tell(point, objective(point), 0.0, 0.0, 3)
     return num_evals
 
 
@@ -200,11 +200,11 @@ class OptimizerCase(HasEnvironmentCase):
         self.assertEqual(tuple(first.ask()), tuple(second.ask()))
 
         point = tuple(first.x[0])
-        first.tell(point, (point[0] - 0.7) ** 2, 0.01)
+        first.tell(point, (point[0] - 0.7) ** 2, 0.01, 0.0, 3)
         num_evals = 1
         while num_evals < 20 and (point := first.ask()) is not None:
             point = tuple(point)
-            first.tell(point, (point[0] - 0.7) ** 2, 0.01)
+            first.tell(point, (point[0] - 0.7) ** 2, 0.01, 0.0, 3)
             num_evals += 1
 
         best_point, best_value = first.best()
@@ -212,6 +212,7 @@ class OptimizerCase(HasEnvironmentCase):
         self.assertAlmostEqual(best_point[0], 0.7, delta=0.15)
         self.assertLess(best_value, 0.03)
 
+    
     def test_bayesian_sampling_and_noise_modes(self):
         robust = BayesianOptimizer(
             (0.0, 0.0),
@@ -225,7 +226,7 @@ class OptimizerCase(HasEnvironmentCase):
         self.assertEqual(robust.n_init, 6)
         self.assertEqual(robust.get_sim_time(), 0.0)
         point = tuple(robust.ask())
-        robust.tell(point, 1.0, 0.0)
+        robust.tell(point, 1.0, 0.0, 0.0, 3)
         self.assertAlmostEqual(robust.init_y_var[-1].item(), 1e-3)
 
         simple = BayesianOptimizer(
@@ -239,7 +240,7 @@ class OptimizerCase(HasEnvironmentCase):
             robust_mode=False,
         )
         point = tuple(simple.ask())
-        simple.tell(point, 1.0, 0.0)
+        simple.tell(point, 1.0, 0.0, 0.0, 3)
         self.assertEqual(simple.init_y_var[-1].item(), 0.0)
 
     def test_default_nelder_mead_simplex_uses_half_bounds_span(self):
@@ -293,10 +294,10 @@ class OptimizerCase(HasEnvironmentCase):
 
         first_point = opt.ask()
         self.assertIsNotNone(first_point)
-        opt.tell(first_point, case["std_values"][0], 0.125)
+        opt.tell(first_point, case["std_values"][0], 0.125, 0.0, 3)
         second_point = opt.ask()
         self.assertIsNotNone(second_point)
-        opt.tell(second_point, case["std_values"][1], 0.25)
+        opt.tell(second_point, case["std_values"][1], 0.25, 0.0, 3)
 
         best_point, best_value = opt.best()
         self.assertEqual(tuple(best_point), tuple(second_point))
@@ -746,6 +747,49 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
             self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.objective"),
             [2.0, 10.0 / 6.0, 0.9],
         )
+
+    def test_reference_noise_is_pooled_over_references(self):
+        from unittest import mock
+
+        import ndscan.experiment.optimize as optimize_module
+
+        created = []
+        original = optimize_module.create_optimizer
+
+        def capture(spec):
+            created.append(original(spec))
+            return created[-1]
+
+        exp = self.create(RepeatOutlierScanExp)
+        exp.args._params["execution_mode"] = "optimise"
+        exp.args._params["optimise"] = {
+            "parameters": [
+                {
+                    "fqn": "test_experiment_optimize.RepeatOutlierFragment.x",
+                    "path": "*",
+                    "min": -1.0,
+                    "max": 1.0,
+                    "initial": 0.0,
+                }
+            ],
+            "objective": {"channel": "objective", "direction": "min"},
+            "algorithm": {"kind": "bayesian", "n_init": 10, "user_seed": 1},
+            # reference, 2 candidates, reference, ...: 3 references in 27 shots
+            "max_evals": 27,
+            "num_repeats_per_point": 3,
+            "averaging_method": "mean",
+            "reference_normalisation": "subtract",
+            "reference_resample_interval": 2,
+            "skip_on_persistent_transitory_error": False,
+        }
+        with mock.patch.object(optimize_module, "create_optimizer", capture):
+            exp.prepare()
+            exp.run()
+
+        # every reference is the shots [9, 0, 0]: per-shot variance 27 (ddof=1)
+        opt = created[0]
+        self.assertAlmostEqual(opt.reference_shot_std, 27**0.5)
+
 
     def test_mean_aggregates_repeated_objective_values(self):
         exp = self.create(RepeatOutlierScanExp)
