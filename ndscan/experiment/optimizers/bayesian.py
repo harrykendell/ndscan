@@ -168,8 +168,9 @@ class BayesianOptimizer(Optimizer):
         self.best_init_y = float("inf")
 
         # Pooled reference-shot noise calibration
-        self.calibrated_objective_std = 0.07 
-        self.calibrated_objective_var = self.calibrated_objective_std**2
+        self.reference_shot_std = 0.07
+     
+        self.calibrated_objective_var = self.reference_shot_std**2
         self.num_failed_points = 0  # told a non-finite value, so discarded
 
     def ask(self) -> tuple[float, ...]:
@@ -257,8 +258,8 @@ class BayesianOptimizer(Optimizer):
 
         # Noise calibration 
         if ref_std_dev > 0:
-            self.calibrated_objective_std = ref_std_dev 
-            self.calibrated_objective_var = self.calibrated_objective_std**2
+            self.reference_shot_std = ref_std_dev
+            self.calibrated_objective_var = self.reference_shot_std **2
 
         # convert to torch tensors and append the data set with the new point(s)
         self.init_y = torch.cat((
@@ -422,7 +423,7 @@ class BayesianOptimizer(Optimizer):
         window = self.x_predictions[-(self.conv_delay + 1) :]
         values = [v for v, _ in window]
         latest_x = window[-1][1]
-        noise = self.calibrated_objective_std
+        noise = self.reference_shot_std
         self.last_convergence = {
             "spread": max(values) - min(values),
             "ftol": max(self._fatol, noise),

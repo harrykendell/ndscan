@@ -865,14 +865,14 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         exp.prepare()
         exp.run()
 
-        self.assertEqual(
-            self.dataset_db.get("ndscan.rid_0.points.channel_objective"),
-            [9.0, 0.0, 0.0],
+        self.assertAlmostEqual(
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 3.0
         )
         self.assertAlmostEqual(
-            self.dataset_db.get("ndscan.rid_0.optimizer.best_value"), 0.0
+            self.dataset_db.get("ndscan.rid_0.optimizer.best_std"),
+            4.242640687119285,  # per-shot spread of [9, 0, 0], np.std (ddof=0)
         )
         self.assertEqual(
             self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.objective"),
-            [0.0],
+            [3.0],
         )

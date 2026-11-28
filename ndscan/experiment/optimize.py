@@ -365,8 +365,8 @@ class OptimizeRunner(HasEnvironment):
                     dtype=float,
                 )
                 objective_std_dev =  float(
-                    np.std(current_objective_samples[:repeats_per_point]))
-                
+                    np.std(samples, ddof=0)
+                )
                 num_evals_used += repeats_per_point
 
                 if current_point_kind == "reference":
