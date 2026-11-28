@@ -423,7 +423,7 @@ class BayesianOptimizer(Optimizer):
         window = self.x_predictions[-(self.conv_delay + 1) :]
         values = [v for v, _ in window]
         latest_x = window[-1][1]
-        noise = self.calibrated_objective_std
+        noise = self.reference_shot_std
         self.last_convergence = {
             "spread": max(values) - min(values),
             "ftol": max(self._fatol, noise),
