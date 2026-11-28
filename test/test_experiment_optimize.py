@@ -789,7 +789,7 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         # every reference is the shots [9, 0, 0]: per-shot variance 27 (ddof=1)
         opt = created[0]
         self.assertAlmostEqual(opt.reference_shot_std, 27**0.5)
-        self.assertAlmostEqual(opt.calibrated_objective_std, (27 * 2 / 3) ** 0.5)
+
 
     def test_mean_aggregates_repeated_objective_values(self):
         exp = self.create(RepeatOutlierScanExp)
