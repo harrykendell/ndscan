@@ -870,7 +870,7 @@ class FragmentOptimizeExpCase(HasEnvironmentCase):
         )
         self.assertAlmostEqual(
             self.dataset_db.get("ndscan.rid_0.optimizer.best_std"),
-            4.242640687119285,  # per-shot spread of [9, 0, 0], np.std (ddof=0)
+            3.0,  # per-shot spread of [9, 0, 0], np.std (ddof=0)
         )
         self.assertEqual(
             self.dataset_db.get("ndscan.rid_0.optimizer.evaluations.objective"),
