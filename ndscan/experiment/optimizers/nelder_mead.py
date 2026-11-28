@@ -24,9 +24,8 @@ class NelderMeadOptimizeAlgorithmSpec(OptimizeAlgorithmSpec):
 class NelderMeadOptimizer(Optimizer):
     """Sequential ask/tell Nelder-Mead implementation.
 
-    Nelder-Mead maintains a simplex of ``n + 1`` points for ``n`` parameters and
-    improves it through reflection, expansion, contraction, and shrink steps. It is a
-    local,
+    Nelder-Mead maintains a simplex of ``n + 1`` points for ``n`` parameters and improves
+    it through reflection, expansion, contraction, and shrink steps. It is a local,
     derivative-free method that can work well on smooth objectives, but may need more
     evaluations than simpler search methods and is sensitive to local minima.
     """
@@ -82,8 +81,8 @@ class NelderMeadOptimizer(Optimizer):
         return None
 
     def tell(
-        self, point: tuple[float, ...], value: float, std_dev: float = 0.0
-    ) -> None:
+        self, point: tuple[float, ...], value: float, std_dev: float = 0.0, 
+        ref_std_dev: float = 0.0, repeats:int = 3) -> None:
         # When we are told the value for a point we need to update the simplex
         del point
 
@@ -180,8 +179,7 @@ class NelderMeadOptimizer(Optimizer):
 
     def _sort_simplex(self) -> None:
         pairs = sorted(
-            zip(self._simplex, self._values, self._value_std_devs, strict=True),
-            key=lambda p: p[1],
+            zip(self._simplex, self._values, self._value_std_devs), key=lambda p: p[1]
         )
         self._simplex = [point for point, _, _ in pairs]
         self._values = [float(value) for _, value, _ in pairs]
@@ -326,8 +324,7 @@ register_algorithm(
             minimum=0.0,
             maximum=10**9,
             default=1e-3,
-            tooltip="Terminate when the objective value changes "
-            "by at most this amount.",
+            tooltip="Terminate when the objective value changes by at most this amount.",
         ),
         AlgorithmParameter(
             name="xatol",
@@ -336,8 +333,7 @@ register_algorithm(
             maximum=1.0,
             default=1e-3,
             step=1e-4,
-            tooltip="Terminate when each axis moves by at most this fraction "
-            "of its configured bounds span.",
+            tooltip="Terminate when each axis moves by at most this fraction of its configured bounds span.",
         ),
         AlgorithmParameter(
             name="simplex_step_fraction",
@@ -346,8 +342,7 @@ register_algorithm(
             maximum=1.0,
             default=0.5,
             step=0.01,
-            tooltip="Maximum initial simplex size around the initial point "
-            "as a fraction of the parameter bounds span.",
+            tooltip="Maximum initial simplex size around the initial point as a fraction of the parameter bounds span.",
         ),
         AlgorithmParameter(
             name="user_seed",

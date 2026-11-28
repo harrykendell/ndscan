@@ -288,6 +288,13 @@ class OptimizeRunner(HasEnvironment):
         reference_value: float | None = None
         reference_std_dev = 0.0
         candidates_since_reference = 0
+        # per-shot variance of every reference so far
+        reference_shot_variances: list[float] = []
+
+        def reference_shot_std() -> float:
+            if not reference_shot_variances:
+                return 0.0
+            return float(np.sqrt(np.mean(reference_shot_variances)))
 
         def publish_best() -> None:
             if on_best_updated is None:
@@ -357,11 +364,8 @@ class OptimizeRunner(HasEnvironment):
                     current_objective_samples[:repeats_per_point],
                     dtype=float,
                 )
-                objective_std_dev = (
-                    float(np.std(samples, ddof=1) / np.sqrt(len(samples)))
-                    if len(samples) > 1
-                    else float(
-                    np.std(current_objective_samples[:repeats_per_point]))
+                objective_std_dev =  float(
+                    np.std(samples, ddof=0)
                 )
                 num_evals_used += repeats_per_point
 
@@ -369,6 +373,8 @@ class OptimizeRunner(HasEnvironment):
                     reference_value = objective_value
                     reference_std_dev = objective_std_dev
                     candidates_since_reference = 0
+                    if len(samples) > 1:
+                        reference_shot_variances.append(float(np.var(samples, ddof=1)))
                 else:
                     normalised = _normalise_objective_value(
                         objective_value,
@@ -404,6 +410,8 @@ class OptimizeRunner(HasEnvironment):
                             current_point,
                             transformed,
                             objective_std_dev,
+                            reference_shot_std(),
+                            repeats_per_point,
                         )
                     candidates_since_reference += 1
                     publish_best()
