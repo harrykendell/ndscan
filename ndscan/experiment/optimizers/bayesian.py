@@ -152,10 +152,7 @@ class BayesianOptimizer(Optimizer):
 
         self.n_init = self.n_params * n_init
 
-        # One seed for the whole run: the Latin-hypercube start AND every later
-        # iteration (see get_next_points) derive from it, so the same seed and the
-        # same measured values reproduce the same sequence of points. With
-        # user_seed = -1 a seed is drawn, and printed so the run can be replayed.
+        # One seed for the whole run
         self.seed = self.user_seed if self.user_seed >= 0 else randint(0, 42)
         print(f"BayesianOptimizer seed: {self.seed}")
 
@@ -171,14 +168,7 @@ class BayesianOptimizer(Optimizer):
         self.best_init_y = float("inf")
 
         # Pooled reference-shot noise calibration
-        self.reference_shot_std = 0.07
-        self.num_repeats_per_point = 3
-
-        # Candidate mean minus independent reference mean
-        self.calibrated_objective_std = self.reference_shot_std * np.sqrt(
-            2 / self.num_repeats_per_point
-        )
-
+        self.calibrated_objective_std = 0.07 
         self.calibrated_objective_var = self.calibrated_objective_std**2
         self.num_failed_points = 0  # told a non-finite value, so discarded
 
@@ -267,12 +257,7 @@ class BayesianOptimizer(Optimizer):
 
         # Noise calibration 
         if ref_std_dev > 0:
-            self.reference_shot_std = ref_std_dev
-            self.num_repeats_per_point = repeats
-
-            self.calibrated_objective_std = self.reference_shot_std * np.sqrt(
-                2 / self.num_repeats_per_point
-            )
+            self.calibrated_objective_std = ref_std_dev 
             self.calibrated_objective_var = self.calibrated_objective_std**2
 
         # convert to torch tensors and append the data set with the new point(s)

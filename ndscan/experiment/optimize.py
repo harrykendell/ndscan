@@ -360,7 +360,10 @@ class OptimizeRunner(HasEnvironment):
                     current_objective_samples[:repeats_per_point],
                     spec.acquisition.averaging_method,
                 )
-               
+                samples = np.asarray(
+                    current_objective_samples[:repeats_per_point],
+                    dtype=float,
+                )
                 objective_std_dev =  float(
                     np.std(current_objective_samples[:repeats_per_point]))
                 
